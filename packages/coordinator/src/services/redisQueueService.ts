@@ -176,8 +176,21 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
           port: inserted.port,
           hostname: r.hostname,
         });
-        // Push to the end of the list (RPUSH)
-        await client.rpush(REDIS_KEYS.QUEUE_PENDING, itemData);
+        // Try to push to the list - if WRONGTYPE error, clear old Hash data first
+        try {
+          // Push to the end of the list (RPUSH)
+          await client.rpush(REDIS_KEYS.QUEUE_PENDING, itemData);
+        } catch (err: unknown) {
+          if (err instanceof Error && err.message.includes('WRONGTYPE')) {
+            // Old Hash data exists, clear it
+            await client.del(REDIS_KEYS.QUEUE_PENDING);
+            await client.del(REDIS_KEYS.QUEUE_PROCESSING);
+            // Retry the rpush
+            await client.rpush(REDIS_KEYS.QUEUE_PENDING, itemData);
+          } else {
+            throw err;
+          }
+        }
         // Track in duplicates set
         await client.hset(REDIS_KEYS.QUEUE_DUPLICATES, key, inserted.id);
       });
@@ -195,19 +208,31 @@ export async function claimFromQueue(db: Db, agentId: string): Promise<ClaimedQu
   const redis = getRedisClient();
 
   if (redis && redis.status === 'ready') {
-    // Check if Redis queue is empty - if so, sync from PostgreSQL
-    const redisPendingCount = await redis.llen(REDIS_KEYS.QUEUE_PENDING);
-    if (redisPendingCount === 0) {
-      await syncPostgresToRedis(db, redis);
-    }
+    try {
+      // Check if Redis queue is empty - if so, sync from PostgreSQL
+      const redisPendingCount = await redis.llen(REDIS_KEYS.QUEUE_PENDING);
+      if (redisPendingCount === 0) {
+        await syncPostgresToRedis(db, redis);
+      }
 
-    // Try Redis first for fast claiming
-    const result = await claimFromQueueRedis(db, redis, agentId);
-    if (result !== null) {
-      return result;
+      // Try Redis first for fast claiming
+      const result = await claimFromQueueRedis(db, redis, agentId);
+      if (result !== null) {
+        return result;
+      }
+      // Redis had items but couldn't claim (no resources)
+      return null;
+    } catch (err: unknown) {
+      // Check if this is a WRONGTYPE error - means old Hash data exists
+      if (err instanceof Error && err.message.includes('WRONGTYPE')) {
+        // Clear the old Hash data and fall back to PostgreSQL
+        await safeRedisCommand(async (client) => {
+          await client.del(REDIS_KEYS.QUEUE_PENDING);
+          await client.del(REDIS_KEYS.QUEUE_PROCESSING);
+        });
+      }
+      // Fall back to PostgreSQL on any Redis error
     }
-    // Redis had items but couldn't claim (no resources)
-    return null;
   }
 
   // Fallback to PostgreSQL
@@ -405,12 +430,34 @@ export async function getQueueStatus(db: Db): Promise<QueueStatus> {
   let processing = 0;
 
   if (redis && redis.status === 'ready') {
-    // Clean up orphaned processing items before getting counts
-    await cleanupOrphanedProcessingItems(redis, db);
+    try {
+      // Clean up orphaned processing items before getting counts
+      await cleanupOrphanedProcessingItems(redis, db);
 
-    // Fast path: Get list lengths from Redis
-    pending = await redis.llen(REDIS_KEYS.QUEUE_PENDING) || 0;
-    processing = await redis.llen(REDIS_KEYS.QUEUE_PROCESSING) || 0;
+      // Fast path: Get list lengths from Redis
+      pending = await redis.llen(REDIS_KEYS.QUEUE_PENDING) || 0;
+      processing = await redis.llen(REDIS_KEYS.QUEUE_PROCESSING) || 0;
+    } catch (err: unknown) {
+      // Check if this is a WRONGTYPE error - means old Hash data exists
+      if (err instanceof Error && err.message.includes('WRONGTYPE')) {
+        // Clear the old Hash data and fall back to PostgreSQL
+        await safeRedisCommand(async (client) => {
+          await client.del(REDIS_KEYS.QUEUE_PENDING);
+          await client.del(REDIS_KEYS.QUEUE_PROCESSING);
+        });
+        // Fall through to PostgreSQL query
+      } else {
+        // For other errors, fall back to PostgreSQL
+        console.error('Redis queue status error:', err);
+      }
+      // Use PostgreSQL fallback
+      const [pendingResult, processingResult] = await Promise.all([
+        db.select({ count: sql<number>`count(*)::int` }).from(scanQueue).where(eq(scanQueue.status, 'pending')),
+        db.select({ count: sql<number>`count(*)::int` }).from(scanQueue).where(eq(scanQueue.status, 'processing')),
+      ]);
+      pending = pendingResult[0]?.count ?? 0;
+      processing = processingResult[0]?.count ?? 0;
+    }
   } else {
     // Fallback: Query PostgreSQL
     const [pendingResult, processingResult] = await Promise.all([
