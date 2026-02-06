@@ -7,6 +7,7 @@ import {
   deleteServer,
   type AddToQueueResult,
 } from '../services/redisQueueService.js';
+import { deleteScanHistory } from '../services/scanQueueManager.js';
 import { eq, or, sql } from 'drizzle-orm';
 import { servers } from '../db/schema.js';
 
@@ -131,6 +132,26 @@ export async function serverRoutes(fastify: FastifyInstance) {
       } catch (err) {
         fastify.log.error(err);
         return reply.code(500).send({ error: 'Failed to delete server', message: String(err) });
+      }
+    }
+  );
+
+  /**
+   * DELETE /api/servers/:id/scan/:timestamp
+   * Delete a specific scan from server's history
+   */
+  fastify.delete<{ Params: { id: string; timestamp: string } }>(
+    '/servers/:id/scan/:timestamp',
+    async (request, reply) => {
+      try {
+        const deleted = await deleteScanHistory(db, request.params.id, decodeURIComponent(request.params.timestamp));
+        if (!deleted) {
+          return reply.code(404).send({ error: 'Scan entry not found' });
+        }
+        return reply.send({ message: 'Scan deleted successfully' });
+      } catch (err) {
+        fastify.log.error(err);
+        return reply.code(500).send({ error: 'Failed to delete scan', message: String(err) });
       }
     }
   );

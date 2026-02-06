@@ -58,6 +58,10 @@ export const api = {
     method: 'DELETE',
   }),
 
+  deleteScanHistory: (serverId, timestamp) => fetchJSON(`${API_BASE}/servers/${serverId}/scan/${encodeURIComponent(timestamp)}`, {
+    method: 'DELETE',
+  }),
+
   // Queue
   getQueueStatus: () => fetchJSON(`${API_BASE}/queue`),
 
