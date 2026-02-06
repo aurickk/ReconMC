@@ -1,0 +1,26 @@
+{
+  "name": "@reconmc/scanner",
+  "version": "1.0.0",
+  "description": "Minecraft server scanner with retry logic",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "test": "node --test"
+  },
+  "keywords": [
+    "minecraft",
+    "server",
+    "scanner",
+    "ping"
+  ],
+  "dependencies": {
+    "socks": "^2.8.7",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

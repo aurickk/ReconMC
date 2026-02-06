@@ -1,0 +1,27 @@
+{
+  "name": "@reconmc/bot",
+  "version": "1.0.0",
+  "description": "Minecraft bot connection layer for ReconMC with proxy support",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "test": "node --test"
+  },
+  "keywords": [
+    "minecraft",
+    "bot",
+    "mineflayer",
+    "proxy"
+  ],
+  "dependencies": {
+    "minecraft-protocol": "^1.63.0",
+    "mineflayer": "^4.34.0",
+    "socks": "^2.8.7"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

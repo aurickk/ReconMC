@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/scanner" },
+    { "path": "./packages/bot" },
+    { "path": "./packages/coordinator" },
+    { "path": "./packages/agent" },
+    { "path": "./packages/discord-bot" }
+  ]
+}

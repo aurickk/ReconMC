@@ -1,0 +1,36 @@
+{
+  "name": "reconmc",
+  "version": "1.0.0",
+  "description": "Minecraft server scanner with coordinator API",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "dev:coordinator": "npm run dev --workspace=@reconmc/coordinator",
+    "dev:agent": "npm run dev --workspace=@reconmc/agent",
+    "start:coordinator": "npm run start --workspace=@reconmc/coordinator",
+    "start:agent": "npm run start --workspace=@reconmc/agent",
+    "dev:dashboard": "npm run dev --workspace=@reconmc/dashboard",
+    "build:dashboard": "npm run build --workspace=@reconmc/dashboard",
+    "discord-bot": "npm run dev --workspace=@reconmc/discord-bot",
+    "dev:bot": "npm run dev --workspace=@reconmc/discord-bot",
+    "start:bot": "npm run start --workspace=@reconmc/discord-bot",
+    "build:bot": "npm run build --workspace=@reconmc/discord-bot",
+    "test": "npm run test --workspaces",
+    "clean": "tsc --build --clean"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^4.0.1",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.9",
+    "isomorphic-dompurify": "^2.35.0",
+    "zod": "^4.3.6"
+  }
+}
