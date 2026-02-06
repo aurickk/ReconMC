@@ -7,8 +7,12 @@ export async function render(container) {
   container.innerHTML = `
     <div class="stats-grid">
       <div class="stat-card">
-        <div class="stat-value" id="stat-batches">-</div>
-        <div class="stat-label">Total Batches</div>
+        <div class="stat-value" id="stat-servers">-</div>
+        <div class="stat-label">Total Servers</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="stat-pending">-</div>
+        <div class="stat-label">Pending Scans</div>
       </div>
       <div class="stat-card">
         <div class="stat-value" id="stat-processing">-</div>
@@ -18,28 +22,23 @@ export async function render(container) {
         <div class="stat-value" id="stat-agents">-</div>
         <div class="stat-label">Agents Online</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-value" id="stat-idle">-</div>
-        <div class="stat-label">Idle Agents</div>
-      </div>
     </div>
 
     <div class="card">
       <div class="card-header">
-        <h2 class="card-title">Recent Batches</h2>
+        <h2 class="card-title">Recent Servers</h2>
       </div>
       <div class="table-container">
         <table>
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Name</th>
+              <th>Server</th>
               <th>Status</th>
-              <th>Progress</th>
-              <th>Created</th>
+              <th>Last Scanned</th>
+              <th>Scan Count</th>
             </tr>
           </thead>
-          <tbody id="batches-table"></tbody>
+          <tbody id="servers-table"></tbody>
         </table>
       </div>
     </div>
@@ -59,80 +58,100 @@ export function cleanup() {
 
 async function loadData() {
   try {
-    const [batches, agents] = await Promise.all([
-      api.getBatches(),
-      api.getAgents(),
+    const [servers, queueStatus, agents] = await Promise.all([
+      api.getServers(10),
+      api.getQueueStatus().catch(() => null),
+      api.getAgents().catch(() => []),
     ]);
 
-    const totalBatches = batches.length || 0;
-    const processingBatches = batches.filter(b => b.status === 'processing').length || 0;
+    const totalServers = queueStatus?.totalServers || servers.length || 0;
+    const pendingScans = queueStatus?.pending || 0;
+    const processingScans = queueStatus?.processing || 0;
     const totalAgents = agents.filter(a => !a.offline).length || 0;
     const idleAgents = agents.filter(a => a.status === 'idle' && !a.offline).length || 0;
 
     // Check if elements exist (page might have been redirected due to auth error)
-    const statBatches = document.getElementById('stat-batches');
+    const statServers = document.getElementById('stat-servers');
+    const statPending = document.getElementById('stat-pending');
     const statProcessing = document.getElementById('stat-processing');
     const statAgents = document.getElementById('stat-agents');
-    const statIdle = document.getElementById('stat-idle');
-    const tbody = document.getElementById('batches-table');
+    const tbody = document.getElementById('servers-table');
 
     // If any key element is missing, the page was likely redirected - abort
-    if (!statBatches || !statProcessing || !statAgents || !statIdle || !tbody) {
+    if (!statServers || !statPending || !statProcessing || !statAgents || !tbody) {
       return;
     }
 
-    statBatches.textContent = totalBatches;
-    statProcessing.textContent = processingBatches;
-    statAgents.textContent = totalAgents;
-    statIdle.textContent = idleAgents;
+    statServers.textContent = totalServers;
+    statPending.textContent = pendingScans;
+    statProcessing.textContent = processingScans;
+    statAgents.textContent = `${totalAgents} (${idleAgents} idle)`;
 
-    const recentBatches = batches.slice(0, 10);
-
-    if (recentBatches.length === 0) {
+    if (servers.length === 0) {
       tbody.innerHTML = `
         <tr>
-          <td colspan="5" class="text-center text-muted">
-            No batches yet. <a href="#batches" style="color: var(--accent)">Create one</a>
+          <td colspan="4" class="text-center text-muted">
+            No servers yet. <a href="#batches" style="color: var(--accent)">Add some</a>
           </td>
         </tr>
       `;
     } else {
-      tbody.innerHTML = recentBatches.map(batch => {
-        const progress = batch.completedTasks && batch.totalTasks
-          ? `${batch.completedTasks}/${batch.totalTasks}`
-          : '-';
-        const progressPercent = batch.totalTasks
-          ? (batch.completedTasks / batch.totalTasks) * 100
-          : 0;
+      tbody.innerHTML = servers.map(server => {
+        const isOnline = server.latestResult?.ping?.success;
+        const serverMode = server.latestResult?.ping?.serverMode || server.latestResult?.serverMode || 'unknown';
+        const modeIcon = serverMode === 'online' ? '🟢' : serverMode === 'cracked' ? '🔴' : '🟡';
+
+        const lastScanned = server.lastScannedAt
+          ? formatRelativeTime(new Date(server.lastScannedAt))
+          : 'Never';
 
         return `
-          <tr class="clickable" data-batch-id="${batch.id}">
-            <td><code>${batch.id.substring(0, 8)}...</code></td>
-            <td>${batch.name || '-'}</td>
-            <td><span class="badge ${batch.status}">${batch.status}</span></td>
+          <tr class="clickable" data-server-id="${server.id}">
             <td>
-              ${progress !== '-' ? `
-                <div class="flex flex-between">
-                  <span>${progress}</span>
-                  <span class="text-muted">${progressPercent.toFixed(0)}%</span>
-                </div>
-                <div class="progress-bar mt-1">
-                  <div class="progress-fill" style="width: ${progressPercent}%"></div>
-                </div>
-              ` : '-'}
+              <div>${escapeHtml(server.serverAddress)}</div>
+              ${isOnline ? `<span class="badge ${serverMode}" style="font-size: 0.7rem;">${modeIcon} ${serverMode}</span>` : ''}
             </td>
-            <td>${new Date(batch.createdAt).toLocaleString()}</td>
+            <td>
+              ${isOnline
+                ? '<span class="badge online">Online</span>'
+                : server.scanCount > 0
+                  ? '<span class="badge offline">Offline</span>'
+                  : '<span class="badge pending">Pending</span>'
+              }
+            </td>
+            <td>${lastScanned}</td>
+            <td>${server.scanCount}</td>
           </tr>
         `;
       }).join('');
 
       tbody.querySelectorAll('tr.clickable').forEach(row => {
         row.addEventListener('click', () => {
-          window.location.hash = `/results?id=${row.dataset.batchId}`;
+          window.location.hash = `/servers?id=${row.dataset.serverId}`;
         });
       });
     }
   } catch (error) {
     showToast(`Error loading dashboard: ${error.message}`, 'error');
   }
+}
+
+function formatRelativeTime(date) {
+  const now = new Date();
+  const diffMs = now - date;
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 1) return 'Just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString();
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
 }

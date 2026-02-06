@@ -1,8 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { createDb } from '../db/index.js';
-import { claimTask, completeTask, failTask } from '../services/taskManager.js';
 import { eq, desc, inArray } from 'drizzle-orm';
-import { tasks, taskLogs, agents } from '../db/schema.js';
+import { scanQueue, taskLogs, agents } from '../db/schema.js';
 import type { NewTaskLog } from '../db/schema.js';
 import { requireApiKey } from '../middleware/auth.js';
 
@@ -55,69 +54,8 @@ export function sanitizeErrorMessage(message: string): string {
 export async function taskRoutes(fastify: FastifyInstance) {
   const db = createDb();
 
-  fastify.post<{ Body: { agentId: string } }>('/tasks/claim', async (request, reply) => {
-    const agentId = request.body?.agentId;
-
-    if (!agentId || typeof agentId !== 'string') {
-      return reply.code(400).send({ error: 'agentId is required' });
-    }
-
-    // Validate agent ID format
-    if (!/^[a-zA-Z0-9_-]+$/.test(agentId) || agentId.length > 100) {
-      return reply.code(400).send({ error: 'Invalid agentId format' });
-    }
-
-    // Verify agent exists
-    const [agent] = await db
-      .select()
-      .from(agents)
-      .where(eq(agents.id, agentId))
-      .limit(1);
-
-    if (!agent) {
-      return reply.code(404).send({ error: 'Agent not registered' });
-    }
-
-    const claimed = await claimTask(db, agentId);
-    if (!claimed) return reply.code(204).send();
-    return reply.send(claimed);
-  });
-
-  fastify.post<{
-    Params: { id: string };
-    Body: { result?: unknown; errorMessage?: string };
-  }>('/tasks/:id/complete', async (request, reply) => {
-    const { id } = request.params;
-    const { result, errorMessage } = request.body ?? {};
-    const [task] = await db.select().from(tasks).where(eq(tasks.id, id)).limit(1);
-    if (!task) return reply.code(404).send({ error: 'Task not found' });
-    if (task.status !== 'processing') {
-      return reply.code(400).send({ error: 'Task is not in processing state' });
-    }
-    await completeTask(
-      db,
-      id,
-      result,
-      errorMessage !== undefined ? sanitizeErrorMessage(errorMessage) : undefined
-    );
-    return reply.code(200).send({ ok: true });
-  });
-
-  fastify.post<{ Params: { id: string }; Body: { errorMessage: string } }>('/tasks/:id/fail', async (request, reply) => {
-    const { id } = request.params;
-    const rawErrorMessage = request.body?.errorMessage ?? 'Unknown error';
-    const errorMessage = sanitizeErrorMessage(rawErrorMessage);
-    const [task] = await db.select().from(tasks).where(eq(tasks.id, id)).limit(1);
-    if (!task) return reply.code(404).send({ error: 'Task not found' });
-    if (task.status !== 'processing') {
-      return reply.code(400).send({ error: 'Task is not in processing state' });
-    }
-    await failTask(db, id, errorMessage);
-    return reply.code(200).send({ ok: true });
-  });
-
   /**
-   * Receive logs from an agent for a task
+   * Receive logs from an agent for a queue item
    */
   fastify.post<{
     Params: { id: string };
@@ -133,15 +71,15 @@ export async function taskRoutes(fastify: FastifyInstance) {
       return reply.code(400).send({ error: 'logs must be an array' });
     }
 
-    const [task] = await db.select().from(tasks).where(eq(tasks.id, id)).limit(1);
-    if (!task) {
-      return reply.code(404).send({ error: 'Task not found' });
+    const [item] = await db.select().from(scanQueue).where(eq(scanQueue.id, id)).limit(1);
+    if (!item) {
+      return reply.code(404).send({ error: 'Queue item not found' });
     }
 
     // Insert log entries with sanitized messages
     for (const log of logs) {
       await db.insert(taskLogs).values({
-        taskId: id,
+        queueId: id,
         agentId,
         level: log.level || 'info',
         message: sanitizeLogMessage(log.message),
@@ -152,7 +90,7 @@ export async function taskRoutes(fastify: FastifyInstance) {
   });
 
   /**
-   * Get logs for a task (protected - requires API key for dashboard users)
+   * Get logs for a queue item (protected - requires API key for dashboard users)
    */
   fastify.get<{
     Params: { id: string };
@@ -167,43 +105,7 @@ export async function taskRoutes(fastify: FastifyInstance) {
     const logs = await db
       .select()
       .from(taskLogs)
-      .where(eq(taskLogs.taskId, id))
-      .orderBy(desc(taskLogs.timestamp))
-      .limit(limitNum)
-      .offset(offsetNum);
-
-    return reply.send(logs);
-  });
-
-  /**
-   * Get logs for a batch (protected - requires API key for dashboard users)
-   */
-  fastify.get<{
-    Params: { id: string };
-    Querystring: { limit?: string; offset?: string };
-  }>('/batches/:id/logs', { onRequest: requireApiKey }, async (request, reply) => {
-    const { id } = request.params;
-    const { limit, offset } = request.query;
-
-    const limitNum = limit ? Math.min(parseInt(limit, 10) || 100, 500) : 100;
-    const offsetNum = offset ? parseInt(offset, 10) || 0 : 0;
-
-    // Get all tasks for the batch
-    const batchTasks = await db
-      .select({ id: tasks.id })
-      .from(tasks)
-      .where(eq(tasks.batchId, id));
-
-    const taskIds = batchTasks.map(t => t.id);
-    if (taskIds.length === 0) {
-      return reply.send([]);
-    }
-
-    // Get logs for all tasks in the batch
-    const logs = await db
-      .select()
-      .from(taskLogs)
-      .where(inArray(taskLogs.taskId, taskIds))
+      .where(eq(taskLogs.queueId, id))
       .orderBy(desc(taskLogs.timestamp))
       .limit(limitNum)
       .offset(offsetNum);

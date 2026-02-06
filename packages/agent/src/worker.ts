@@ -47,7 +47,7 @@ async function register(base: string): Promise<boolean> {
   return res.ok;
 }
 
-async function heartbeat(base: string, status: string, currentTaskId?: string): Promise<void> {
+async function heartbeat(base: string, status: string, currentQueueId?: string): Promise<void> {
   try {
     await fetch(`${base}/api/agents/heartbeat`, {
       method: 'POST',
@@ -55,7 +55,7 @@ async function heartbeat(base: string, status: string, currentTaskId?: string): 
       body: JSON.stringify({
         agentId: AGENT_ID,
         status,
-        ...(currentTaskId && { currentTaskId }),
+        ...(currentQueueId && { currentQueueId }),
       }),
     });
   } catch {
@@ -64,13 +64,13 @@ async function heartbeat(base: string, status: string, currentTaskId?: string): 
 }
 
 async function claimTask(base: string): Promise<{
-  taskId: string;
+  queueId: string;
   serverAddress: string;
   port: number;
   proxy: { host: string; port: number; type: 'socks4' | 'socks5'; username?: string; password?: string };
   account: CoordinatorAccount;
 } | null> {
-  const res = await fetch(`${base}/api/tasks/claim`, {
+  const res = await fetch(`${base}/api/queue/claim`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agentId: AGENT_ID }),
@@ -78,7 +78,7 @@ async function claimTask(base: string): Promise<{
   if (res.status === 204) return null;
   if (!res.ok) return null;
   const data = await res.json() as {
-    taskId: string;
+    queueId: string;
     serverAddress: string;
     port: number;
     proxy: { host: string; port: number; type: 'socks4' | 'socks5'; username?: string; password?: string };
@@ -87,16 +87,16 @@ async function claimTask(base: string): Promise<{
   return data;
 }
 
-async function completeTask(base: string, taskId: string, result: unknown): Promise<void> {
-  await fetch(`${base}/api/tasks/${taskId}/complete`, {
+async function completeTask(base: string, queueId: string, result: unknown): Promise<void> {
+  await fetch(`${base}/api/queue/${queueId}/complete`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ result }),
   });
 }
 
-async function failTask(base: string, taskId: string, errorMessage: string): Promise<void> {
-  await fetch(`${base}/api/tasks/${taskId}/fail`, {
+async function failTask(base: string, queueId: string, errorMessage: string): Promise<void> {
+  await fetch(`${base}/api/queue/${queueId}/fail`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ errorMessage }),
@@ -160,17 +160,17 @@ export async function runWorker(): Promise<void> {
       continue;
     }
 
-    await heartbeat(base, 'busy', claimed.taskId);
-    const { taskId, serverAddress, port, proxy, account } = claimed;
+    await heartbeat(base, 'busy', claimed.queueId);
+    const { queueId, serverAddress, port, proxy, account } = claimed;
 
     // Set logging context for this task
-    setTaskContext(taskId);
+    setTaskContext(queueId);
 
     // Log task assignment details (sensitive info redacted)
     const displayServer = serverAddress.includes(':') ? serverAddress : `${serverAddress}:${port}`;
-    logger.info(`[Task] ${taskId} - Received task for ${displayServer}`);
-    logger.info(`[Task] ${taskId} - Proxy: ${proxy.type} (IP redacted)`);
-    logger.info(`[Task] ${taskId} - Account type: ${account.type}${account.type === 'microsoft' ? ' (Microsoft authentication)' : ''}`);
+    logger.info(`[Task] ${queueId} - Received task for ${displayServer}`);
+    logger.info(`[Task] ${queueId} - Proxy: ${proxy.type} (IP redacted)`);
+    logger.info(`[Task] ${queueId} - Account type: ${account.type}${account.type === 'microsoft' ? ' (Microsoft authentication)' : ''}`);
 
     // Add overall timeout for the entire scan (60 seconds max per task)
     const scanTimeoutMs = 60000;
@@ -231,21 +231,21 @@ export async function runWorker(): Promise<void> {
       const serverMode = fullResult.serverMode || 'unknown';
       const scanTime = Date.now() - taskStartTime;
 
-      logger.info(`[Task] ${taskId} - COMPLETED: Ping ${pingSuccess} (${pingLatencyStr}), Connect ${connSuccess} (${connLatencyStr}), Mode: ${serverMode}, Plugins: ${plugins}, Time: ${scanTime}ms`);
+      logger.info(`[Task] ${queueId} - COMPLETED: Ping ${pingSuccess} (${pingLatencyStr}), Connect ${connSuccess} (${connLatencyStr}), Mode: ${serverMode}, Plugins: ${plugins}, Time: ${scanTime}ms`);
 
       // Flush any pending logs before completing the task
       clearTaskContext();
-      await completeTask(base, taskId, fullResult);
+      await completeTask(base, queueId, fullResult);
     } catch (err) {
       if (scanTimeoutHandle) {
         clearTimeout(scanTimeoutHandle);
       }
       const scanTime = Date.now() - taskStartTime;
       const message = err instanceof Error ? err.message : String(err);
-      logger.error(`[Task] ${taskId} - FAILED: ${message} (Time: ${scanTime}ms)`);
+      logger.error(`[Task] ${queueId} - FAILED: ${message} (Time: ${scanTime}ms)`);
       // Flush logs before failing the task
       clearTaskContext();
-      await failTask(base, taskId, message);
+      await failTask(base, queueId, message);
     } finally {
       // Clear the token refresh callback
       clearTokenRefreshCallback();

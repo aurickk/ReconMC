@@ -2,76 +2,77 @@
  * Coordinator API client for communicating with the ReconMC coordinator
  */
 import { logger } from '../logger.js';
-import type { McStatusData, McPlayer, McPlayers, McVersion } from './api.js';
+import type { McStatusData } from './api.js';
 
-export interface CoordinatorBatchRequest {
-  servers: string[];
-  name?: string;
-}
-
-export interface CoordinatorBatchRequest {
-  servers: string[];
-  name?: string;
-}
-
-export interface CoordinatorBatch {
+export interface CoordinatorServer {
   id: string;
-  name: string | null;
-  status: 'pending' | 'processing' | 'completed' | 'cancelled';
-  totalTasks: number;
-  completedTasks: number;
-  createdAt: string;
-  completedAt: string | null;
-}
-
-export interface CoordinatorTask {
-  id: string;
-  batchId: string;
   serverAddress: string;
+  hostname: string | null;
+  resolvedIp: string | null;
   port: number;
-  status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'skipped';
-  result: {
-    ping: {
-      success: boolean;
-      host: string;
-      port: number;
-      resolvedIp?: string;
-      status?: {
-        raw: string;
-        data?: McStatusData;
-        latency: number | null;
-      };
-      attempts: number;
-      timestamp: string;
-      serverMode?: 'online' | 'cracked' | 'unknown';
-      validatedPlayers?: Array<{ name: string; id: string; originalId?: string }>;
-    };
-    connection?: {
-      success: boolean;
-      host: string;
-      port: number;
-      username: string;
-      uuid?: string;
-      connectedAt?: string;
-      disconnectedAt?: string;
-      spawnPosition?: { x: number; y: number; z: number };
-      error?: { code: string; message: string; kicked?: boolean; kickReason?: string };
-      attempts: number;
-      latency?: number;
-      accountType?: 'cracked' | 'microsoft';
-      serverPlugins?: { plugins: string[]; method: string; antiCheats: string[] };
-      serverAuth?: { authRequired: boolean; authType?: string; success: boolean; error?: string };
-    };
-    serverMode?: 'online' | 'cracked' | 'unknown';
-  } | null;
-  errorMessage: string | null;
-  startedAt: string | null;
-  completedAt: string | null;
+  firstSeenAt: string;
+  lastScannedAt: string | null;
+  scanCount: number;
+  latestResult: CoordinatorScanResult | null;
+  scanHistory: Array<{
+    timestamp: string;
+    result: CoordinatorScanResult | null;
+    errorMessage?: string;
+  }>;
 }
 
-export interface CoordinatorBatchResults {
-  batch: CoordinatorBatch;
-  tasks: CoordinatorTask[];
+export interface CoordinatorScanResult {
+  ping: {
+    success: boolean;
+    host: string;
+    port: number;
+    resolvedIp?: string;
+    status?: {
+      raw: string;
+      data?: McStatusData;
+      latency: number | null;
+    };
+    attempts: number;
+    timestamp: string;
+    serverMode?: 'online' | 'cracked' | 'unknown';
+    validatedPlayers?: Array<{ name: string; id: string; originalId?: string }>;
+  };
+  connection?: {
+    success: boolean;
+    host: string;
+    port: number;
+    username: string;
+    uuid?: string;
+    connectedAt?: string;
+    disconnectedAt?: string;
+    spawnPosition?: { x: number; y: number; z: number };
+    error?: { code: string; message: string; kicked?: boolean; kickReason?: string };
+    attempts: number;
+    latency?: number;
+    accountType?: 'cracked' | 'microsoft';
+    serverPlugins?: { plugins: string[]; method: string; antiCheats: string[] };
+    serverAuth?: { authRequired: boolean; authType?: string; success: boolean; error?: string };
+  };
+  serverMode?: 'online' | 'cracked' | 'unknown';
+}
+
+export interface AddServersResult {
+  added: number;
+  skipped: number;
+  queued: Array<{
+    id: string;
+    serverAddress: string;
+    resolvedIp: string;
+    port: number;
+  }>;
+}
+
+export interface QueueStatus {
+  pending: number;
+  processing: number;
+  completed: number;
+  failed: number;
+  totalServers: number;
 }
 
 export interface CoordinatorHealth {
@@ -194,68 +195,97 @@ export class CoordinatorAPIClient {
   }
 
   /**
-   * Create a batch with a single server
-   * Returns a simplified batch object with the batch ID
+   * Add a server to the scan queue
+   * Returns the add servers result with added count and queued items
    */
-  async createScanBatch(host: string, port: number = 25565): Promise<{ id: string; totalTasks: number }> {
+  async addServerToQueue(host: string, port: number = 25565): Promise<AddServersResult> {
     const server = port !== 25565 ? `${host}:${port}` : host;
 
-    logger.debug(`[CoordinatorAPI] Creating batch for ${server}`);
+    logger.debug(`[CoordinatorAPI] Adding server to queue: ${server}`);
 
-    const response = await fetch(`${this.baseUrl}/api/batches`, {
+    const response = await fetch(`${this.baseUrl}/api/servers/add`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
         servers: [server],
-        name: `Discord scan: ${server}`,
       }),
     });
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ message: 'Unknown error' }));
-      throw new Error((error as { message?: string }).message || `Failed to create batch: ${response.status}`);
+      throw new Error((error as { message?: string }).message || `Failed to add server: ${response.status}`);
     }
 
-    // API returns { batchId, totalTasks, skippedDuplicates }
-    const result = await response.json() as { batchId: string; totalTasks: number; skippedDuplicates: number };
-    logger.debug(`[CoordinatorAPI] Batch created: ${result.batchId} (${result.totalTasks} tasks)`);
-    
-    return { id: result.batchId, totalTasks: result.totalTasks };
+    const result = await response.json() as AddServersResult;
+    logger.debug(`[CoordinatorAPI] Server added to queue: ${result.added} added, ${result.skipped} skipped`);
+
+    return result;
   }
 
   /**
-   * Get batch results
+   * Get queue status
    */
-  async getBatchResults(batchId: string): Promise<CoordinatorBatchResults> {
-    const response = await fetch(`${this.baseUrl}/api/batches/${batchId}/results`, {
+  async getQueueStatus(): Promise<QueueStatus> {
+    const response = await fetch(`${this.baseUrl}/api/queue`, {
       headers: this.getHeaders(),
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to get batch results: ${response.status}`);
+      throw new Error(`Failed to get queue status: ${response.status}`);
     }
 
-    return response.json() as Promise<CoordinatorBatchResults>;
+    return response.json() as Promise<QueueStatus>;
   }
 
   /**
-   * Convert coordinator task result to full scan result format (ping + connection)
+   * Get server by ID with full scan history
    */
-  private taskToScanResult(task: CoordinatorTask): FullScanResult {
-    if (!task.result || !task.result.ping) {
+  async getServer(serverId: string): Promise<CoordinatorServer | null> {
+    const response = await fetch(`${this.baseUrl}/api/servers/${serverId}`, {
+      headers: this.getHeaders(),
+    });
+
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw new Error(`Failed to get server: ${response.status}`);
+    }
+
+    return response.json() as Promise<CoordinatorServer>;
+  }
+
+  /**
+   * Get servers list
+   */
+  async getServers(limit: number = 100, offset: number = 0): Promise<CoordinatorServer[]> {
+    const response = await fetch(`${this.baseUrl}/api/servers?limit=${limit}&offset=${offset}`, {
+      headers: this.getHeaders(),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to get servers: ${response.status}`);
+    }
+
+    return response.json() as Promise<CoordinatorServer[]>;
+  }
+
+  /**
+   * Convert coordinator scan result to full scan result format (ping + connection)
+   */
+  private resultToScanResult(result: CoordinatorScanResult | null): FullScanResult {
+    if (!result || !result.ping) {
       return {
         ping: {
           success: false,
-          host: task.serverAddress,
-          port: task.port,
-          error: task.errorMessage || 'No result available',
+          host: 'unknown',
+          port: 25565,
+          error: 'No result available',
           attempts: 1,
-          timestamp: task.completedAt || new Date().toISOString(),
+          timestamp: new Date().toISOString(),
         },
       };
     }
 
-    const ping = task.result.ping;
+    const ping = result.ping;
     return {
       ping: {
         success: ping.success,
@@ -266,69 +296,93 @@ export class CoordinatorAPIClient {
         error: ping.success ? undefined : 'Server offline or unreachable',
         attempts: ping.attempts,
         timestamp: ping.timestamp,
-        serverMode: ping.serverMode || task.result.serverMode,
+        serverMode: ping.serverMode || result.serverMode,
         validatedPlayers: ping.validatedPlayers,
       },
-      connection: task.result.connection ? {
-        success: task.result.connection.success,
-        host: task.result.connection.host,
-        port: task.result.connection.port,
-        username: task.result.connection.username,
-        uuid: task.result.connection.uuid,
-        connectedAt: task.result.connection.connectedAt,
-        disconnectedAt: task.result.connection.disconnectedAt,
-        spawnPosition: task.result.connection.spawnPosition,
-        error: task.result.connection.error,
-        attempts: task.result.connection.attempts,
-        latency: task.result.connection.latency,
-        accountType: task.result.connection.accountType,
-        serverPlugins: task.result.connection.serverPlugins ? {
-          plugins: task.result.connection.serverPlugins.plugins,
-          method: task.result.connection.serverPlugins.method as 'command_tree' | 'tab_complete' | 'combined' | 'plugins_command' | 'bukkit_plugins_command' | 'none',
-          antiCheats: task.result.connection.serverPlugins.antiCheats,
+      connection: result.connection ? {
+        success: result.connection.success,
+        host: result.connection.host,
+        port: result.connection.port,
+        username: result.connection.username,
+        uuid: result.connection.uuid,
+        connectedAt: result.connection.connectedAt,
+        disconnectedAt: result.connection.disconnectedAt,
+        spawnPosition: result.connection.spawnPosition,
+        error: result.connection.error,
+        attempts: result.connection.attempts,
+        latency: result.connection.latency,
+        accountType: result.connection.accountType,
+        serverPlugins: result.connection.serverPlugins ? {
+          plugins: result.connection.serverPlugins.plugins,
+          method: result.connection.serverPlugins.method as 'command_tree' | 'tab_complete' | 'combined' | 'plugins_command' | 'bukkit_plugins_command' | 'none',
+          antiCheats: result.connection.serverPlugins.antiCheats,
         } : undefined,
-        serverAuth: task.result.connection.serverAuth ? {
-          authRequired: task.result.connection.serverAuth.authRequired,
-          authType: task.result.connection.serverAuth.authType as 'login' | 'register' | undefined,
-          success: task.result.connection.serverAuth.success,
-          error: task.result.connection.serverAuth.error,
+        serverAuth: result.connection.serverAuth ? {
+          authRequired: result.connection.serverAuth.authRequired,
+          authType: result.connection.serverAuth.authType as 'login' | 'register' | undefined,
+          success: result.connection.serverAuth.success,
+          error: result.connection.serverAuth.error,
         } : undefined,
       } : undefined,
-      serverMode: ping.serverMode || task.result.serverMode,
+      serverMode: ping.serverMode || result.serverMode,
     };
   }
 
   /**
-   * Scan a server by creating a batch and polling for results
+   * Scan a server by adding it to the queue and polling for completion
    * Returns a full scan result with both ping and connection data
    */
   async scanServer(host: string, port: number = 25565): Promise<FullScanResult> {
-    const batch = await this.createScanBatch(host, port);
-    return await this.waitForCompletion(batch.id);
+    // Add server to queue
+    const addResult = await this.addServerToQueue(host, port);
+
+    if (addResult.queued.length === 0) {
+      // Server was not queued (likely a duplicate already pending/processing)
+      // Try to find the server in the servers list
+      const server = port !== 25565 ? `${host}:${port}` : host;
+      throw new Error(`Server already in queue: ${server}`);
+    }
+
+    // Poll for completion
+    return await this.waitForScanCompletion(host, port);
   }
 
   /**
-   * Wait for batch completion and return the full scan result
+   * Wait for server scan completion and return the full scan result
    */
-  async waitForCompletion(batchId: string): Promise<FullScanResult> {
+  private async waitForScanCompletion(host: string, port: number): Promise<FullScanResult> {
     const startTime = Date.now();
+    const serverAddress = port !== 25565 ? `${host}:${port}` : host;
 
     while (Date.now() - startTime < this.MAX_POLL_TIME_MS) {
-      const results = await this.getBatchResults(batchId);
+      // Try to find the server in the servers list
+      const servers = await this.getServers(100);
 
-      // Check if batch is complete, failed, or cancelled
-      if (results.batch.status === 'completed' ||
-          results.batch.status === 'cancelled' ||
-          (results.batch.completedTasks > 0 && results.batch.completedTasks >= results.batch.totalTasks)) {
-        // Get the first (and only) task result
-        if (results.tasks.length === 0) {
-          throw new Error('No tasks found in batch');
+      // Find the server by address
+      const server = servers.find(s => s.serverAddress === serverAddress);
+
+      if (server && server.lastScannedAt) {
+        // Server has been scanned at least once
+        const scannedTime = new Date(server.lastScannedAt).getTime();
+        const addedTime = startTime;
+
+        // Only return if scanned after we added it
+        if (scannedTime >= addedTime - 1000) { // -1000 to account for clock skew
+          logger.debug(`[CoordinatorAPI] Server scan complete: ${serverAddress}`);
+          return this.resultToScanResult(server.latestResult);
         }
+      }
 
-        const task = results.tasks[0];
-        logger.debug(`[CoordinatorAPI] Batch ${batchId} complete, task status: ${task.status}`);
-
-        return this.taskToScanResult(task);
+      // Check if still in queue
+      const queueStatus = await this.getQueueStatus();
+      if (queueStatus.pending === 0 && queueStatus.processing === 0) {
+        // Queue is empty but we didn't find our scan - something went wrong
+        // Check one more time for the server
+        if (server && server.lastScannedAt) {
+          logger.debug(`[CoordinatorAPI] Server scan found in final check: ${serverAddress}`);
+          return this.resultToScanResult(server.latestResult);
+        }
+        throw new Error('Scan completed but result not found');
       }
 
       // Wait before polling again
@@ -336,33 +390,5 @@ export class CoordinatorAPIClient {
     }
 
     throw new Error('Scan timed out after 2 minutes');
-  }
-
-  /**
-   * Cancel a batch
-   */
-  async cancelBatch(batchId: string): Promise<void> {
-    const response = await fetch(`${this.baseUrl}/api/batches/${batchId}/cancel`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to cancel batch: ${response.status}`);
-    }
-  }
-
-  /**
-   * Delete a batch
-   */
-  async deleteBatch(batchId: string): Promise<void> {
-    const response = await fetch(`${this.baseUrl}/api/batches/${batchId}`, {
-      method: 'DELETE',
-      headers: this.getHeaders(),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to delete batch: ${response.status}`);
-    }
   }
 }

@@ -2,8 +2,9 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import { runMigrations } from './db/migrate.js';
-import { batchRoutes } from './routes/batches.js';
 import { taskRoutes } from './routes/tasks.js';
+import { serverRoutes } from './routes/servers.js';
+import { queueRoutes } from './routes/queue.js';
 import { accountRoutes } from './routes/accounts.js';
 import { proxyRoutes } from './routes/proxies.js';
 import { agentRoutes } from './routes/agents.js';
@@ -55,10 +56,13 @@ export async function createCoordinatorServer(allowedOrigins?: string[]) {
   // Register task routes (public for agents, GET logs are protected internally)
   await fastify.register(taskRoutes, { prefix: '/api' });
 
+  // Register queue routes (public for agents)
+  await fastify.register(queueRoutes, { prefix: '/api' });
+
   // Register protected routes (require API key)
   await fastify.register(async function (fastify) {
     fastify.addHook('onRequest', requireApiKey);
-    await fastify.register(batchRoutes, { prefix: '/api' });
+    await fastify.register(serverRoutes, { prefix: '/api' });
     await fastify.register(accountRoutes, { prefix: '/api' });
     await fastify.register(proxyRoutes, { prefix: '/api' });
   });

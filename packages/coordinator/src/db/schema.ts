@@ -7,35 +7,9 @@ import {
   timestamp,
   text,
   jsonb,
+  unique,
 } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
-
-export const batches = pgTable('batches', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  name: varchar('name', { length: 255 }),
-  status: varchar('status', { length: 50 }).default('pending').notNull(),
-  totalTasks: integer('total_tasks').default(0).notNull(),
-  completedTasks: integer('completed_tasks').default(0).notNull(),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  completedAt: timestamp('completed_at'),
-});
-
-export const tasks = pgTable('tasks', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  batchId: uuid('batch_id').references(() => batches.id, { onDelete: 'cascade' }),
-  serverAddress: varchar('server_address', { length: 255 }).notNull(),
-  resolvedIp: varchar('resolved_ip', { length: 45 }),
-  port: integer('port').default(25565).notNull(),
-  status: varchar('status', { length: 50 }).default('pending').notNull(),
-  assignedAgentId: varchar('assigned_agent_id', { length: 100 }),
-  assignedProxyId: uuid('assigned_proxy_id'),
-  assignedAccountId: uuid('assigned_account_id'),
-  result: jsonb('result'),
-  errorMessage: text('error_message'),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  startedAt: timestamp('started_at'),
-  completedAt: timestamp('completed_at'),
-});
 
 export const proxies = pgTable('proxies', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -72,38 +46,65 @@ export const agents = pgTable('agents', {
   name: varchar('name', { length: 100 }),
   secret: varchar('secret', { length: 128 }), // Agent authentication secret (hashed)
   status: varchar('status', { length: 50 }).default('idle').notNull(),
-  currentTaskId: uuid('current_task_id').references(() => tasks.id),
+  currentQueueId: uuid('current_queue_id').references(() => scanQueue.id),
   lastHeartbeat: timestamp('last_heartbeat').defaultNow().notNull(),
   registeredAt: timestamp('registered_at').defaultNow().notNull(),
 });
 
 export const taskLogs = pgTable('task_logs', {
   id: uuid('id').primaryKey().defaultRandom(),
-  taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'cascade' }).notNull(),
+  queueId: uuid('queue_id').references(() => scanQueue.id, { onDelete: 'cascade' }),
   agentId: varchar('agent_id', { length: 100 }),
   level: varchar('level', { length: 20 }).default('info').notNull(),
   message: text('message').notNull(),
   timestamp: timestamp('timestamp').defaultNow().notNull(),
 });
 
+// IP pool + server history system
+
+export const scanQueue = pgTable('scan_queue', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  serverAddress: varchar('server_address', { length: 255 }).notNull(),
+  hostname: varchar('hostname', { length: 255 }),
+  resolvedIp: varchar('resolved_ip', { length: 45 }),
+  port: integer('port').default(25565).notNull(),
+  status: varchar('status', { length: 50 }).default('pending').notNull(),
+  assignedAgentId: varchar('assigned_agent_id', { length: 100 }),
+  assignedProxyId: uuid('assigned_proxy_id').references(() => proxies.id, { onDelete: 'set null' }),
+  assignedAccountId: uuid('assigned_account_id').references(() => accounts.id, { onDelete: 'set null' }),
+  errorMessage: text('error_message'),
+  retryCount: integer('retry_count').default(0).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  startedAt: timestamp('started_at'),
+  completedAt: timestamp('completed_at'),
+}, (table) => ({
+  uniqueEntry: unique('idx_scan_queue_unique').on(table.resolvedIp, table.port, table.hostname),
+}));
+
+export const servers = pgTable('servers', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  serverAddress: varchar('server_address', { length: 255 }).notNull(),
+  hostname: varchar('hostname', { length: 255 }),
+  resolvedIp: varchar('resolved_ip', { length: 45 }),
+  port: integer('port').default(25565).notNull(),
+  firstSeenAt: timestamp('first_seen_at').defaultNow().notNull(),
+  lastScannedAt: timestamp('last_scanned_at'),
+  scanCount: integer('scan_count').default(0).notNull(),
+  latestResult: jsonb('latest_result'),
+  scanHistory: jsonb('scan_history').default([]).$type<{ timestamp: string; result: unknown; errorMessage?: string }[]>(),
+}, (table) => ({
+  uniqueServer: unique('servers_unique').on(table.resolvedIp, table.port, table.hostname),
+}));
+
 export type TaskLog = typeof taskLogs.$inferSelect;
 export type NewTaskLog = typeof taskLogs.$inferInsert;
-
-export const batchesRelations = relations(batches, ({ many }) => ({
-  tasks: many(tasks),
-}));
-
-export const tasksRelations = relations(tasks, ({ one }) => ({
-  batch: one(batches),
-}));
-
-export type Batch = typeof batches.$inferSelect;
-export type NewBatch = typeof batches.$inferInsert;
-export type Task = typeof tasks.$inferSelect;
-export type NewTask = typeof tasks.$inferInsert;
 export type Proxy = typeof proxies.$inferSelect;
 export type NewProxy = typeof proxies.$inferInsert;
 export type Account = typeof accounts.$inferSelect;
 export type NewAccount = typeof accounts.$inferInsert;
 export type Agent = typeof agents.$inferSelect;
 export type NewAgent = typeof agents.$inferInsert;
+export type ScanQueue = typeof scanQueue.$inferSelect;
+export type NewScanQueue = typeof scanQueue.$inferInsert;
+export type Server = typeof servers.$inferSelect;
+export type NewServer = typeof servers.$inferInsert;

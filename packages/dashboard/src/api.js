@@ -44,29 +44,25 @@ async function fetchJSON(url, options = {}) {
 }
 
 export const api = {
-  // Batches
-  getBatches: () => fetchJSON(`${API_BASE}/batches`),
+  // Servers
+  getServers: (limit = 100, offset = 0) => fetchJSON(`${API_BASE}/servers?limit=${limit}&offset=${offset}`),
 
-  getBatch: (id) => fetchJSON(`${API_BASE}/batches/${id}`),
+  getServer: (id) => fetchJSON(`${API_BASE}/servers/${id}`),
 
-  getBatchResults: (id) => fetchJSON(`${API_BASE}/batches/${id}/results`),
-
-  getTaskLogs: (id, limit = 100, offset = 0) => fetchJSON(`${API_BASE}/tasks/${id}/logs?limit=${limit}&offset=${offset}`),
-
-  getBatchLogs: (id, limit = 100, offset = 0) => fetchJSON(`${API_BASE}/batches/${id}/logs?limit=${limit}&offset=${offset}`),
-
-  createBatch: (servers, name) => fetchJSON(`${API_BASE}/batches`, {
+  addServers: (servers) => fetchJSON(`${API_BASE}/servers/add`, {
     method: 'POST',
-    body: JSON.stringify({ servers, name }),
+    body: JSON.stringify({ servers }),
   }),
 
-  cancelBatch: (id) => fetchJSON(`${API_BASE}/batches/${id}/cancel`, {
-    method: 'POST',
-  }),
-
-  deleteBatch: (id) => fetchJSON(`${API_BASE}/batches/${id}`, {
+  deleteServer: (id) => fetchJSON(`${API_BASE}/servers/${id}`, {
     method: 'DELETE',
   }),
+
+  // Queue
+  getQueueStatus: () => fetchJSON(`${API_BASE}/queue`),
+
+  // Task logs (for scan queue items)
+  getTaskLogs: (id, limit = 100, offset = 0) => fetchJSON(`${API_BASE}/tasks/${id}/logs?limit=${limit}&offset=${offset}`),
 
   // Agents
   getAgents: () => fetchJSON(`${API_BASE}/agents`),

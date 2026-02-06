@@ -78,7 +78,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
           name: agentName,
           status: 'idle',
           lastHeartbeat: new Date(),
-          currentTaskId: null,
+          currentQueueId: null,
         },
       });
 
@@ -86,7 +86,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
   });
 
   // Agent heartbeat (public - agents are in same Docker network)
-  fastify.post<{ Body: { agentId: string; status?: string; currentTaskId?: string } }>(
+  fastify.post<{ Body: { agentId: string; status?: string; currentQueueId?: string } }>(
     '/agents/heartbeat',
     async (request, reply) => {
       const agentId = request.body?.agentId;
@@ -109,7 +109,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
         .set({
           lastHeartbeat: new Date(),
           ...(request.body?.status && { status: request.body.status }),
-          ...(request.body?.currentTaskId !== undefined && { currentTaskId: request.body.currentTaskId }),
+          ...(request.body?.currentQueueId !== undefined && { currentQueueId: request.body.currentQueueId }),
         })
         .where(eq(agents.id, agentId));
       return reply.code(200).send({ ok: true });
