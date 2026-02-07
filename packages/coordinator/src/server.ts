@@ -10,7 +10,9 @@ import { proxyRoutes } from './routes/proxies.js';
 import { agentRoutes } from './routes/agents.js';
 import { logger } from './logger.js';
 import { requireApiKey, isAuthDisabled } from './middleware/auth.js';
-import { isRedisAvailable } from './db/redis.js';
+import { isRedisAvailable, closeRedis } from './db/redis.js';
+import { closeDb } from './db/index.js';
+import { rateLimitPlugin } from './middleware/rate-limit.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
@@ -33,11 +35,29 @@ function getCorsOrigin(allowedOrigins: string[] | undefined) {
 }
 
 export async function createCoordinatorServer(allowedOrigins?: string[]) {
-  const fastify = Fastify({ logger: true, trustProxy: true });
+  const fastify = Fastify({
+    logger: true,
+    trustProxy: true,
+    bodyLimit: 2 * 1024 * 1024,
+  });
 
   await fastify.register(cors, {
     origin: getCorsOrigin(allowedOrigins),
     credentials: true
+  });
+
+  await fastify.register(rateLimitPlugin, {
+    windowMs: 60_000,
+    max: 120,
+    skip: (request) => {
+      const url = request.url;
+      return (
+        url.startsWith('/api/agents/register') ||
+        url.startsWith('/api/agents/heartbeat') ||
+        url.startsWith('/api/queue/claim') ||
+        url.startsWith('/api/health')
+      );
+    },
   });
 
   // Register /api/health BEFORE other routes so it stays public (no auth required)
@@ -115,6 +135,24 @@ export async function startCoordinatorServer(
 ): Promise<void> {
   await runMigrations();
   const server = await createCoordinatorServer(allowedOrigins);
+
+  const shutdown = async (signal: string) => {
+    logger.info(`Received ${signal}, shutting down gracefully...`);
+    try {
+      await server.close();
+      await closeRedis();
+      await closeDb();
+      logger.info('Shutdown complete');
+      process.exit(0);
+    } catch (err) {
+      logger.error('Error during shutdown:', err);
+      process.exit(1);
+    }
+  };
+
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+
   await server.listen({ port, host });
   logger.info(`Coordinator listening on http://${host}:${port}`);
 }

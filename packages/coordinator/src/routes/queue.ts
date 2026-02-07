@@ -7,6 +7,25 @@ import {
   getQueueStatus,
   getQueueEntries,
 } from '../services/redisQueueService.js';
+import { z } from 'zod';
+
+const claimSchema = z.object({
+  agentId: z.string().min(1).max(100),
+});
+
+const completeSchema = z.object({
+  result: z.unknown().optional(),
+});
+
+const failSchema = z.object({
+  errorMessage: z.string().max(5000).default('Scan failed'),
+});
+
+const entriesQuerySchema = z.object({
+  status: z.enum(['pending', 'processing', 'completed', 'failed', 'all']).default('all'),
+  limit: z.coerce.number().int().min(1).max(1000).default(100),
+  offset: z.coerce.number().int().min(0).default(0),
+});
 
 export async function queueRoutes(fastify: FastifyInstance) {
   const db = createDb();
@@ -29,22 +48,16 @@ export async function queueRoutes(fastify: FastifyInstance) {
    * GET /api/queue/entries
    * Get queue entries with optional status filter (pending/processing/completed/failed/all)
    */
-  fastify.get<{ Querystring: { status?: string; limit?: string; offset?: string } }>(
+  fastify.get(
     '/queue/entries',
     async (request, reply) => {
-      const { status = 'all', limit = '100', offset = '0' } = request.query;
-      const validStatuses = ['pending', 'processing', 'completed', 'failed', 'all'];
-
-      if (!validStatuses.includes(status)) {
-        return reply.code(400).send({ error: 'Invalid status filter' });
-      }
+      const parsed = entriesQuerySchema.safeParse((request as any).query);
+      const { status, limit, offset } = parsed.success
+        ? parsed.data
+        : { status: 'all' as const, limit: 100, offset: 0 };
 
       try {
-        const entries = await getQueueEntries(db, {
-          status: status as 'pending' | 'processing' | 'completed' | 'failed' | 'all',
-          limit: parseInt(limit, 10),
-          offset: parseInt(offset, 10),
-        });
+        const entries = await getQueueEntries(db, { status, limit, offset });
         return reply.send(entries);
       } catch (err) {
         fastify.log.error(err);
@@ -58,13 +71,14 @@ export async function queueRoutes(fastify: FastifyInstance) {
    * Agent claims next server from queue
    * Replaces /api/tasks/claim
    */
-  fastify.post<{ Body: { agentId: string } }>(
+  fastify.post(
     '/queue/claim',
     async (request, reply) => {
-      const { agentId } = request.body ?? {};
-      if (!agentId || typeof agentId !== 'string') {
-        return reply.code(400).send({ error: 'agentId is required' });
+      const parsed = claimSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'agentId is required', details: parsed.error.issues });
       }
+      const { agentId } = parsed.data;
 
       try {
         const claimed = await claimFromQueue(db, agentId);
@@ -84,10 +98,11 @@ export async function queueRoutes(fastify: FastifyInstance) {
    * Complete a scan, update history, remove from queue
    * Replaces /api/tasks/:id/complete
    */
-  fastify.post<{ Params: { id: string }; Body: { result?: unknown } }>(
+  fastify.post<{ Params: { id: string } }>(
     '/queue/:id/complete',
     async (request, reply) => {
-      const { result } = request.body ?? {};
+      const parsed = completeSchema.safeParse(request.body);
+      const result = parsed.success ? parsed.data.result : undefined;
 
       try {
         await completeScan(db, request.params.id, result);
@@ -104,10 +119,11 @@ export async function queueRoutes(fastify: FastifyInstance) {
    * Fail a scan, remove from queue with cleanup
    * Replaces /api/tasks/:id/fail
    */
-  fastify.post<{ Params: { id: string }; Body: { errorMessage?: string } }>(
+  fastify.post<{ Params: { id: string } }>(
     '/queue/:id/fail',
     async (request, reply) => {
-      const { errorMessage = 'Scan failed' } = request.body ?? {};
+      const parsed = failSchema.safeParse(request.body);
+      const errorMessage = parsed.success ? parsed.data.errorMessage : 'Scan failed';
 
       try {
         await failScan(db, request.params.id, errorMessage);

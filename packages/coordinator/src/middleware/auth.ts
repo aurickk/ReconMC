@@ -1,19 +1,24 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import * as crypto from 'node:crypto';
 
-const API_KEYS = new Set<string>();
-const envKey = process.env.RECONMC_API_KEY;
+const envKey = process.env.RECONMC_API_KEY?.trim() ?? '';
 const AUTH_DISABLED = process.env.RECONMC_DISABLE_AUTH === 'true';
+const envKeyBuffer = envKey ? Buffer.from(envKey, 'utf8') : null;
 
-if (envKey) {
-  API_KEYS.add(envKey.trim());
+function timingSafeApiKeyCheck(provided: string): boolean {
+  if (!envKeyBuffer) return false;
+  const providedBuffer = Buffer.from(provided, 'utf8');
+  if (providedBuffer.length !== envKeyBuffer.length) {
+    crypto.timingSafeEqual(envKeyBuffer, envKeyBuffer);
+    return false;
+  }
+  return crypto.timingSafeEqual(providedBuffer, envKeyBuffer);
 }
 
 export async function requireApiKey(
   request: FastifyRequest,
   reply: FastifyReply
 ) {
-  // Skip auth check if disabled
   if (AUTH_DISABLED) {
     request.log.info({ apiKey: 'AUTH_DISABLED' }, 'API request');
     return;
@@ -21,11 +26,10 @@ export async function requireApiKey(
 
   const apiKey = request.headers['x-api-key'] as string;
 
-  if (!apiKey || !API_KEYS.has(apiKey)) {
+  if (!apiKey || !timingSafeApiKeyCheck(apiKey)) {
     return reply.code(401).send({ error: 'Unauthorized' });
   }
 
-  // Add hook for logging (redacted key)
   request.log.info({ apiKey: apiKey.substring(0, 8) + '...' }, 'API request');
 }
 

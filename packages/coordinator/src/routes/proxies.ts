@@ -4,6 +4,29 @@ import { eq } from 'drizzle-orm';
 import { proxies } from '../db/schema.js';
 import type { NewProxy } from '../db/schema.js';
 import { isPrivateIp } from '../services/ipResolver.js';
+import { z } from 'zod';
+
+const createProxySchema = z.object({
+  host: z.string().min(1).max(255),
+  port: z.number().int().min(1).max(65535),
+  username: z.string().max(255).optional(),
+  password: z.string().max(255).optional(),
+  protocol: z.enum(['socks4', 'socks5']).default('socks5'),
+  maxConcurrent: z.number().int().min(1).max(100).default(3),
+});
+
+const updateProxySchema = z.object({
+  host: z.string().min(1).max(255).optional(),
+  port: z.number().int().min(1).max(65535).optional(),
+  username: z.string().max(255).optional(),
+  password: z.string().max(255).optional(),
+  isActive: z.boolean().optional(),
+  maxConcurrent: z.number().int().min(1).max(100).optional(),
+});
+
+const importProxiesSchema = z.object({
+  content: z.string().min(1).max(500000),
+});
 
 /**
  * Hostnames that should be blocked for proxy configuration
@@ -99,32 +122,17 @@ export async function proxyRoutes(fastify: FastifyInstance) {
     return reply.send(list);
   });
 
-  fastify.post<{
-    Body: {
-      host: string;
-      port: number;
-      username?: string;
-      password?: string;
-      protocol?: string;
-      maxConcurrent?: number;
-    };
-  }>('/proxies', async (request, reply) => {
-    const body = request.body ?? {};
-    if (!body.host || typeof body.port !== 'number') {
-      return reply.code(400).send({ error: 'host and port are required' });
+  fastify.post('/proxies', async (request, reply) => {
+    const parsed = createProxySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
     }
+    const body = parsed.data;
 
-    // Validate proxy hostname to prevent SSRF
     if (!isValidProxyHost(body.host)) {
       return reply.code(400).send({ error: 'Invalid proxy host: private IPs and localhost are not allowed' });
     }
 
-    // Validate port range
-    if (body.port < 1 || body.port > 65535) {
-      return reply.code(400).send({ error: 'Port must be between 1 and 65535' });
-    }
-
-    const protocol = (body.protocol === 'socks4' ? 'socks4' : 'socks5') as 'socks4' | 'socks5';
     const [row] = await db
       .insert(proxies)
       .values({
@@ -132,29 +140,25 @@ export async function proxyRoutes(fastify: FastifyInstance) {
         port: body.port,
         username: body.username ?? null,
         password: body.password ?? null,
-        protocol,
-        maxConcurrent: body.maxConcurrent ?? 3,
+        protocol: body.protocol,
+        maxConcurrent: body.maxConcurrent,
       } as NewProxy)
       .returning();
     return reply.code(201).send(row);
   });
 
-  fastify.put<{
-    Params: { id: string };
-    Body: Partial<{ host: string; port: number; username: string; password: string; isActive: boolean; maxConcurrent: number }>;
-  }>('/proxies/:id', async (request, reply) => {
-    const [existing] = await db.select().from(proxies).where(eq(proxies.id, request.params.id)).limit(1);
-    if (!existing) return reply.code(404).send({ error: 'Proxy not found' });
-    const body = request.body ?? {};
-
-    // Validate proxy hostname if being updated
-    if (body.host !== undefined && !isValidProxyHost(body.host)) {
-      return reply.code(400).send({ error: 'Invalid proxy host: private IPs and localhost are not allowed' });
+  fastify.put<{ Params: { id: string } }>('/proxies/:id', async (request, reply) => {
+    const parsed = updateProxySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
     }
 
-    // Validate port range if being updated
-    if (body.port !== undefined && (body.port < 1 || body.port > 65535)) {
-      return reply.code(400).send({ error: 'Port must be between 1 and 65535' });
+    const [existing] = await db.select().from(proxies).where(eq(proxies.id, request.params.id)).limit(1);
+    if (!existing) return reply.code(404).send({ error: 'Proxy not found' });
+    const body = parsed.data;
+
+    if (body.host !== undefined && !isValidProxyHost(body.host)) {
+      return reply.code(400).send({ error: 'Invalid proxy host: private IPs and localhost are not allowed' });
     }
 
     const [updated] = await db
@@ -178,11 +182,12 @@ export async function proxyRoutes(fastify: FastifyInstance) {
     return reply.code(204).send();
   });
 
-  fastify.post<{ Body: { content: string } }>('/proxies/import', async (request, reply) => {
-    const content = request.body?.content;
-    if (typeof content !== 'string') {
-      return reply.code(400).send({ error: 'content is required (Webshare format text)' });
+  fastify.post('/proxies/import', async (request, reply) => {
+    const parsed = importProxiesSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'content is required (Webshare format text)', details: parsed.error.issues });
     }
+    const content = parsed.data.content;
     const lines = content.split('\n').map((l) => parseWebshareLine(l)).filter((p): p is NonNullable<typeof p> => p !== null);
     if (lines.length === 0) return reply.code(400).send({ error: 'No valid proxy lines found' });
     const values = lines.map((p) => ({

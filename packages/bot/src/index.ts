@@ -5,7 +5,7 @@
  * multiple authentication methods (cracked and Microsoft).
  */
 
-export * from './types';
+export * from './types.js';
 export * from './bot-connector.js';
 export {
   validateProxyConfig,

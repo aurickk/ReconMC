@@ -6,6 +6,9 @@ import { setTokenRefreshCallback, clearTokenRefreshCallback } from '@reconmc/bot
 
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS ?? '5000', 10);
 const HEARTBEAT_INTERVAL_MS = 30_000;
+const MAX_REGISTER_RETRIES = 10;
+const REGISTER_RETRY_DELAY_MS = 3000;
+const MAX_CONSECUTIVE_FAILURES = 20;
 
 function getCoordinatorBase(): string {
   return COORDINATOR_URL.replace(/\/$/, '');
@@ -129,9 +132,25 @@ async function reportRefreshedTokens(base: string, accountId: string, tokens: {
 export async function runWorker(): Promise<void> {
   const base = getCoordinatorBase();
 
-  const ok = await register(base);
-  if (!ok) {
-    logger.error('[Agent] Failed to register with coordinator');
+  let registered = false;
+  for (let attempt = 1; attempt <= MAX_REGISTER_RETRIES; attempt++) {
+    try {
+      const ok = await register(base);
+      if (ok) {
+        registered = true;
+        break;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`[Agent] Registration attempt ${attempt}/${MAX_REGISTER_RETRIES} failed: ${msg}`);
+    }
+    if (attempt < MAX_REGISTER_RETRIES) {
+      const delay = REGISTER_RETRY_DELAY_MS * Math.min(attempt, 5);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  if (!registered) {
+    logger.error('[Agent] Failed to register with coordinator after all retries');
     process.exit(1);
   }
   logger.info(`[Agent] Registered as ${AGENT_ID}`);
@@ -148,13 +167,33 @@ export async function runWorker(): Promise<void> {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
+  let consecutiveFailures = 0;
+
   while (running) {
     if (Date.now() - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
-      await heartbeat(base, 'idle');
+      try {
+        await heartbeat(base, 'idle');
+      } catch {
+        logger.warn('[Agent] Heartbeat failed');
+      }
       lastHeartbeat = Date.now();
     }
 
-    const claimed = await claimTask(base);
+    let claimed: Awaited<ReturnType<typeof claimTask>> = null;
+    try {
+      claimed = await claimTask(base);
+      if (claimed) consecutiveFailures = 0;
+    } catch (err) {
+      consecutiveFailures++;
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`[Agent] Failed to claim task (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}): ${msg}`);
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        logger.error('[Agent] Too many consecutive failures, exiting');
+        process.exit(1);
+      }
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS * 2));
+      continue;
+    }
     if (!claimed) {
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
       continue;
@@ -221,10 +260,10 @@ export async function runWorker(): Promise<void> {
       }
 
       // Log completion summary BEFORE clearing context
-      const pingSuccess = fullResult.ping?.success ? '✓' : '✗';
+      const pingSuccess = fullResult.ping?.success ? 'OK' : 'FAIL';
       const pingLatency = fullResult.ping?.status?.latency ?? 'N/A';
       const pingLatencyStr = typeof pingLatency === 'number' ? `${pingLatency}ms` : String(pingLatency);
-      const connSuccess = fullResult.connection?.success ? '✓' : '✗';
+      const connSuccess = fullResult.connection?.success ? 'OK' : 'FAIL';
       const connLatency = fullResult.connection?.latency;
       const connLatencyStr = connLatency ? `${connLatency}ms` : 'N/A';
       const plugins = fullResult.connection?.serverPlugins?.plugins?.length || 0;
@@ -233,9 +272,13 @@ export async function runWorker(): Promise<void> {
 
       logger.info(`[Task] ${queueId} - COMPLETED: Ping ${pingSuccess} (${pingLatencyStr}), Connect ${connSuccess} (${connLatencyStr}), Mode: ${serverMode}, Plugins: ${plugins}, Time: ${scanTime}ms`);
 
-      // Flush any pending logs before completing the task
       clearTaskContext();
-      await completeTask(base, queueId, fullResult);
+      try {
+        await completeTask(base, queueId, fullResult);
+      } catch (reportErr) {
+        const msg = reportErr instanceof Error ? reportErr.message : String(reportErr);
+        logger.error(`[Task] ${queueId} - Failed to report completion: ${msg}`);
+      }
     } catch (err) {
       if (scanTimeoutHandle) {
         clearTimeout(scanTimeoutHandle);
@@ -243,15 +286,22 @@ export async function runWorker(): Promise<void> {
       const scanTime = Date.now() - taskStartTime;
       const message = err instanceof Error ? err.message : String(err);
       logger.error(`[Task] ${queueId} - FAILED: ${message} (Time: ${scanTime}ms)`);
-      // Flush logs before failing the task
       clearTaskContext();
-      await failTask(base, queueId, message);
+      try {
+        await failTask(base, queueId, message);
+      } catch (reportErr) {
+        const msg = reportErr instanceof Error ? reportErr.message : String(reportErr);
+        logger.error(`[Task] ${queueId} - Failed to report failure: ${msg}`);
+      }
     } finally {
-      // Clear the token refresh callback
       clearTokenRefreshCallback();
     }
 
-    await heartbeat(base, 'idle');
+    try {
+      await heartbeat(base, 'idle');
+    } catch {
+      logger.warn('[Agent] Post-task heartbeat failed');
+    }
     lastHeartbeat = Date.now();
   }
 

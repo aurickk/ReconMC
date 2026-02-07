@@ -4,6 +4,37 @@ import { eq } from 'drizzle-orm';
 import { accounts } from '../db/schema.js';
 import type { NewAccount } from '../db/schema.js';
 import { validateAccount } from '../services/account-validator.js';
+import { z } from 'zod';
+
+const createAccountSchema = z.object({
+  type: z.enum(['microsoft', 'cracked']),
+  username: z.string().min(1).max(64).optional(),
+  accessToken: z.string().max(10000).optional(),
+  refreshToken: z.string().max(10000).optional(),
+  maxConcurrent: z.number().int().min(1).max(100).default(3),
+});
+
+const updateAccountSchema = z.object({
+  username: z.string().min(1).max(64).optional(),
+  accessToken: z.string().max(10000).optional(),
+  refreshToken: z.string().max(10000).optional(),
+  isActive: z.boolean().optional(),
+  maxConcurrent: z.number().int().min(1).max(100).optional(),
+});
+
+const updateTokensSchema = z.object({
+  accessToken: z.string().min(1).max(10000),
+  refreshToken: z.string().max(10000).optional(),
+});
+
+const importAccountsSchema = z.object({
+  accounts: z.array(z.object({
+    type: z.enum(['microsoft', 'cracked']),
+    username: z.string().max(64).optional(),
+    accessToken: z.string().max(10000).optional(),
+    refreshToken: z.string().max(10000).optional(),
+  })).min(1).max(1000),
+});
 
 export async function accountRoutes(fastify: FastifyInstance) {
   const db = createDb();
@@ -36,19 +67,12 @@ export async function accountRoutes(fastify: FastifyInstance) {
     return reply.send(list);
   });
 
-  fastify.post<{
-    Body: {
-      type: string;
-      username?: string;
-      accessToken?: string;
-      refreshToken?: string;
-      maxConcurrent?: number;
-    };
-  }>('/accounts', async (request, reply) => {
-    const body = request.body ?? {};
-    if (body.type !== 'microsoft' && body.type !== 'cracked') {
-      return reply.code(400).send({ error: 'type must be microsoft or cracked' });
+  fastify.post('/accounts', async (request, reply) => {
+    const parsed = createAccountSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
     }
+    const body = parsed.data;
 
     // Validate account credentials (with refresh token for Microsoft accounts)
     const validation = await validateAccount(
@@ -81,13 +105,14 @@ export async function accountRoutes(fastify: FastifyInstance) {
     return reply.code(201).send(row);
   });
 
-  fastify.put<{
-    Params: { id: string };
-    Body: Partial<{ username: string; accessToken: string; refreshToken: string; isActive: boolean; maxConcurrent: number }>;
-  }>('/accounts/:id', async (request, reply) => {
+  fastify.put<{ Params: { id: string } }>('/accounts/:id', async (request, reply) => {
+    const parsed = updateAccountSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
     const [existing] = await db.select().from(accounts).where(eq(accounts.id, request.params.id)).limit(1);
     if (!existing) return reply.code(404).send({ error: 'Account not found' });
-    const body = request.body ?? {};
+    const body = parsed.data;
 
     // If updating access token, re-validate the account
     if (body.accessToken !== undefined && existing.type === 'microsoft') {
@@ -168,17 +193,15 @@ export async function accountRoutes(fastify: FastifyInstance) {
   );
 
   // Update account tokens (called by agents after refreshing)
-  fastify.put<{
-    Params: { id: string };
-    Body: { accessToken: string; refreshToken?: string };
-  }>('/accounts/:id/tokens', async (request, reply) => {
+  fastify.put<{ Params: { id: string } }>('/accounts/:id/tokens', async (request, reply) => {
+    const parsed = updateTokensSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
     const [existing] = await db.select().from(accounts).where(eq(accounts.id, request.params.id)).limit(1);
     if (!existing) return reply.code(404).send({ error: 'Account not found' });
 
-    const { accessToken, refreshToken } = request.body ?? {};
-    if (!accessToken || typeof accessToken !== 'string') {
-      return reply.code(400).send({ error: 'accessToken is required' });
-    }
+    const { accessToken, refreshToken } = parsed.data;
 
     const updated = await db
       .update(accounts)
@@ -208,13 +231,14 @@ export async function accountRoutes(fastify: FastifyInstance) {
     return reply.code(204).send();
   });
 
-  fastify.post<{ Body: { accounts: Array<{ type: string; username?: string; accessToken?: string; refreshToken?: string }> } }>(
+  fastify.post(
     '/accounts/import',
     async (request, reply) => {
-      const list = request.body?.accounts;
-      if (!Array.isArray(list) || list.length === 0) {
-        return reply.code(400).send({ error: 'accounts array is required' });
+      const parsed = importAccountsSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
       }
+      const list = parsed.data.accounts;
 
       // Validate each account and build results
       const accountsToInsert: NewAccount[] = [];

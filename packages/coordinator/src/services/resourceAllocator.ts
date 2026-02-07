@@ -72,14 +72,14 @@ export async function releaseResources(
     await tx
       .update(proxies)
       .set({
-        currentUsage: sql`${proxies.currentUsage} - 1`,
+        currentUsage: sql`GREATEST(0, ${proxies.currentUsage} - 1)`,
       })
       .where(eq(proxies.id, proxyId));
 
     await tx
       .update(accounts)
       .set({
-        currentUsage: sql`${accounts.currentUsage} - 1`,
+        currentUsage: sql`GREATEST(0, ${accounts.currentUsage} - 1)`,
       })
       .where(eq(accounts.id, accountId));
   });

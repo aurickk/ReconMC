@@ -11,7 +11,7 @@ interface LogEntry {
 
 let currentTaskId: string | null = null;
 let logBuffer: LogEntry[] = [];
-let flushTimer: NodeJS.Timeout | null = null;
+let flushTimer: ReturnType<typeof setInterval> | null = null;
 const FLUSH_INTERVAL_MS = 2000;
 const MAX_BUFFER_SIZE = 50;
 
@@ -34,13 +34,13 @@ export function clearTaskContext() {
   currentTaskId = null;
   logBuffer = [];
   if (flushTimer) {
-    clearTimeout(flushTimer);
+    clearInterval(flushTimer);
     flushTimer = null;
   }
 }
 
 function startFlushTimer() {
-  if (flushTimer) clearTimeout(flushTimer);
+  if (flushTimer) clearInterval(flushTimer);
   flushTimer = setInterval(() => {
     if (logBuffer.length > 0) {
       flushLogs();

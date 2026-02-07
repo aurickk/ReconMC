@@ -7,9 +7,18 @@ import {
   deleteServer,
   type AddToQueueResult,
 } from '../services/redisQueueService.js';
-import { deleteScanHistory } from '../services/scanQueueManager.js';
 import { eq, or, sql } from 'drizzle-orm';
 import { servers } from '../db/schema.js';
+import { z } from 'zod';
+
+const addServersSchema = z.object({
+  servers: z.array(z.string().min(1).max(255)).min(1).max(10000),
+});
+
+const paginationSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(1000).default(100),
+  offset: z.coerce.number().int().min(0).default(0),
+});
 
 export async function serverRoutes(fastify: FastifyInstance) {
   const db = createDb();
@@ -22,13 +31,13 @@ export async function serverRoutes(fastify: FastifyInstance) {
   fastify.post<{ Body: { servers: string[] } }>(
     '/servers/add',
     async (request, reply) => {
-      const { servers: serverList } = request.body ?? {};
-      if (!Array.isArray(serverList) || serverList.length === 0) {
-        return reply.code(400).send({ error: 'servers array is required and must not be empty' });
+      const parsed = addServersSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
       }
 
       try {
-        const result = await addToQueue(db, { servers: serverList });
+        const result = await addToQueue(db, { servers: parsed.data.servers });
         return reply.code(201).send(result);
       } catch (err) {
         fastify.log.error(err);
@@ -45,8 +54,9 @@ export async function serverRoutes(fastify: FastifyInstance) {
   fastify.get<{ Querystring: { limit?: string; offset?: string } }>(
     '/servers',
     async (request, reply) => {
-      const limit = request.query.limit ? parseInt(request.query.limit, 10) : 100;
-      const offset = request.query.offset ? parseInt(request.query.offset, 10) : 0;
+      const params = paginationSchema.safeParse(request.query);
+      const limit = params.success ? params.data.limit : 100;
+      const offset = params.success ? params.data.offset : 0;
 
       try {
         const serverList = await listServers(db, { limit, offset });
@@ -132,26 +142,6 @@ export async function serverRoutes(fastify: FastifyInstance) {
       } catch (err) {
         fastify.log.error(err);
         return reply.code(500).send({ error: 'Failed to delete server', message: String(err) });
-      }
-    }
-  );
-
-  /**
-   * DELETE /api/servers/:id/scan/:timestamp
-   * Delete a specific scan from server's history
-   */
-  fastify.delete<{ Params: { id: string; timestamp: string } }>(
-    '/servers/:id/scan/:timestamp',
-    async (request, reply) => {
-      try {
-        const deleted = await deleteScanHistory(db, request.params.id, decodeURIComponent(request.params.timestamp));
-        if (!deleted) {
-          return reply.code(404).send({ error: 'Scan entry not found' });
-        }
-        return reply.send({ message: 'Scan deleted successfully' });
-      } catch (err) {
-        fastify.log.error(err);
-        return reply.code(500).send({ error: 'Failed to delete scan', message: String(err) });
       }
     }
   );
