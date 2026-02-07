@@ -1,6 +1,6 @@
 import { eq, and, or, sql, desc, asc } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
-import { scanQueue, servers, agents } from '../db/schema.js';
+import { scanQueue, servers, agents, taskLogs } from '../db/schema.js';
 import type { NewScanQueue, Server, ScanQueue } from '../db/schema.js';
 import { resolveServerIp, PrivateIpError, parseServerAddress } from './ipResolver.js';
 import { allocateResourcesTx, releaseResources } from './resourceAllocator.js';
@@ -286,15 +286,28 @@ export async function completeScan(
       .where(eq(agents.id, item.assignedAgentId));
   }
 
-  // Build scan history entry
+  // Build scan history entry - fetch logs before queue item is deleted
   const completedAt = new Date();
   const duration = item.startedAt ? completedAt.getTime() - new Date(item.startedAt).getTime() : null;
+
+  // Fetch all logs for this queue item before deleting it
+  const logs = await db
+    .select()
+    .from(taskLogs)
+    .where(eq(taskLogs.queueId, queueId))
+    .orderBy(desc(taskLogs.timestamp))
+    .limit(500); // Get up to 500 most recent log lines
 
   const historyEntry = {
     timestamp: completedAt.toISOString(),
     result: errorMessage ? null : result,
     errorMessage: errorMessage ?? undefined,
     duration: duration,
+    logs: logs.map(log => ({
+      level: log.level,
+      message: log.message,
+      timestamp: log.timestamp?.toISOString() ?? completedAt.toISOString(),
+    })),
   };
 
   // Update or create server record

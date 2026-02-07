@@ -234,7 +234,7 @@ export async function runWorker(): Promise<void> {
       logger.info(`[Task] ${queueId} - COMPLETED: Ping ${pingSuccess} (${pingLatencyStr}), Connect ${connSuccess} (${connLatencyStr}), Mode: ${serverMode}, Plugins: ${plugins}, Time: ${scanTime}ms`);
 
       // Flush any pending logs before completing the task
-      clearTaskContext();
+      await clearTaskContext();
       await completeTask(base, queueId, fullResult);
     } catch (err) {
       if (scanTimeoutHandle) {
@@ -244,7 +244,7 @@ export async function runWorker(): Promise<void> {
       const message = err instanceof Error ? err.message : String(err);
       logger.error(`[Task] ${queueId} - FAILED: ${message} (Time: ${scanTime}ms)`);
       // Flush logs before failing the task
-      clearTaskContext();
+      await clearTaskContext();
       await failTask(base, queueId, message);
     } finally {
       // Clear the token refresh callback

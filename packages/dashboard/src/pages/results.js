@@ -1021,44 +1021,50 @@ function showScanDetail(scan) {
 }
 
 async function loadLogs(scan) {
-  // Since we're using the server history, logs are embedded in the scan result
-  // We'll show any error messages or connection details as logs
+  // Use actual agent logs from scan history if available, otherwise generate synthetic logs
   const logsContainer = document.getElementById('logs-container');
   if (!logsContainer) return;
 
-  const result = scan.result;
-  const logs = [];
+  let logs = [];
 
-  if (scan.errorMessage) {
-    logs.push({ level: 'error', message: scan.errorMessage, timestamp: scan.timestamp });
+  // Use actual agent logs if they exist in the scan history
+  if (scan.logs && Array.isArray(scan.logs) && scan.logs.length > 0) {
+    logs = scan.logs;
+  } else {
+    // Fall back to synthetic logs from scan result
+    const result = scan.result;
+
+    if (scan.errorMessage) {
+      logs.push({ level: 'error', message: scan.errorMessage, timestamp: scan.timestamp });
+    }
+
+    if (result?.ping) {
+      const ping = result.ping;
+      logs.push({ level: 'info', message: `Ping: ${ping.success ? 'Success' : 'Failed'} (${ping.status?.latency ?? 'N/A'}ms)`, timestamp: scan.timestamp });
+      if (ping.serverMode) {
+        logs.push({ level: 'info', message: `Server mode: ${ping.serverMode}`, timestamp: scan.timestamp });
+      }
+    }
+
+    if (result?.connection) {
+      const conn = result.connection;
+      logs.push({ level: 'info', message: `Connection: ${conn.success ? 'Success' : 'Failed'}`, timestamp: scan.timestamp });
+      if (conn.latency) {
+        logs.push({ level: 'info', message: `Latency: ${conn.latency}ms`, timestamp: scan.timestamp });
+      }
+      if (conn.accountType) {
+        logs.push({ level: 'info', message: `Account type: ${conn.accountType}`, timestamp: scan.timestamp });
+      }
+      if (conn.error) {
+        logs.push({ level: 'error', message: `Connection error: ${conn.error.code} - ${conn.error.message}`, timestamp: scan.timestamp });
+      }
+      if (conn.serverPlugins?.plugins) {
+        logs.push({ level: 'info', message: `Plugins found: ${conn.serverPlugins.plugins.length}`, timestamp: scan.timestamp });
+      }
+    }
   }
 
-  if (result?.ping) {
-    const ping = result.ping;
-    logs.push({ level: 'info', message: `Ping: ${ping.success ? 'Success' : 'Failed'} (${ping.status?.latency ?? 'N/A'}ms)`, timestamp: scan.timestamp });
-    if (ping.serverMode) {
-      logs.push({ level: 'info', message: `Server mode: ${ping.serverMode}`, timestamp: scan.timestamp });
-    }
-  }
-
-  if (result?.connection) {
-    const conn = result.connection;
-    logs.push({ level: 'info', message: `Connection: ${conn.success ? 'Success' : 'Failed'}`, timestamp: scan.timestamp });
-    if (conn.latency) {
-      logs.push({ level: 'info', message: `Latency: ${conn.latency}ms`, timestamp: scan.timestamp });
-    }
-    if (conn.accountType) {
-      logs.push({ level: 'info', message: `Account type: ${conn.accountType}`, timestamp: scan.timestamp });
-    }
-    if (conn.error) {
-      logs.push({ level: 'error', message: `Connection error: ${conn.error.code} - ${conn.error.message}`, timestamp: scan.timestamp });
-    }
-    if (conn.serverPlugins?.plugins) {
-      logs.push({ level: 'info', message: `Plugins found: ${conn.serverPlugins.plugins.length}`, timestamp: scan.timestamp });
-    }
-  }
-
-  currentLogs = logs.reverse();
+  currentLogs = logs;
   renderLogs(logsContainer, currentLogs);
 }
 

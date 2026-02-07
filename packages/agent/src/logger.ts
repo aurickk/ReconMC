@@ -29,8 +29,9 @@ export function setTaskContext(taskId: string) {
   startFlushTimer();
 }
 
-export function clearTaskContext() {
-  flushLogs();
+export async function clearTaskContext() {
+  // Flush logs and wait for them to be sent before clearing context
+  await flushLogs();
   currentTaskId = null;
   logBuffer = [];
   if (flushTimer) {
