@@ -620,8 +620,21 @@ function renderServerHistory(container) {
   const historyList = document.getElementById('scan-history');
 
   // Combine latest result with history
+  // Only add latestResult if it's not already in scanHistory (compare by timestamp)
   const allScans = [...scanHistory];
-  if (server.latestResult && (!scanHistory.length || scanHistory[0]?.result !== server.latestResult)) {
+  if (server.latestResult && scanHistory.length > 0) {
+    const latestHistoryTimestamp = new Date(scanHistory[0]?.timestamp).getTime();
+    const lastScannedTimestamp = new Date(server.lastScannedAt).getTime();
+    // If timestamps don't match, the latestResult is a newer scan not yet in history
+    if (lastScannedTimestamp > latestHistoryTimestamp) {
+      allScans.unshift({
+        timestamp: server.lastScannedAt,
+        result: server.latestResult,
+        errorMessage: null,
+      });
+    }
+  } else if (server.latestResult && scanHistory.length === 0) {
+    // No history yet, add latest result
     allScans.unshift({
       timestamp: server.lastScannedAt,
       result: server.latestResult,
