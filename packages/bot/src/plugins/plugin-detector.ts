@@ -77,7 +77,6 @@ const COMMAND_SIGNATURES = new Map<string, string>([
   ['tp', 'essentialsx'],
   ['tphere', 'essentialsx'],
   ['tpo', 'essentialsx'],
-  ['tphere', 'essentialsx'],
   ['tpa', 'essentialsx'],
   ['tpahere', 'essentialsx'],
   ['warp', 'essentialsx'],
@@ -163,12 +162,12 @@ const COMMAND_SIGNATURES = new Map<string, string>([
   ['corelookup', 'coreprotect'],
 
   // LuckoPerms
-  ['lp', 'luckyperms'],
-  ['luckyperms:', 'luckyperms'],
-  ['luckyperms', 'luckyperms'],
-  ['perm', 'luckyperms'],
-  ['permission', 'luckyperms'],
-  ['networkuser', 'luckyperms'],
+  ['lp', 'luckperms'],
+  ['luckperms:', 'luckperms'],
+  ['luckperms', 'luckperms'],
+  ['perm', 'luckperms'],
+  ['permission', 'luckperms'],
+  ['networkuser', 'luckperms'],
 
   // ProtocolLib
   ['protocol', 'protocollib'],
@@ -200,7 +199,7 @@ const COMMAND_SIGNATURES = new Map<string, string>([
   ['discord', 'discordsrv'],
 
   // Essentials
-  ['essentails:', 'essentialsx'],
+  ['essentials:', 'essentialsx'],
   ['esschat', 'essentialsx'],
   ['essentials:chat', 'essentialsx'],
   ['essentials:spawn', 'essentialsx'],
@@ -310,7 +309,7 @@ const COMMAND_SIGNATURES = new Map<string, string>([
   ['ws', 'wildstacker'],
 
   // RoseStacker
-  ['rodestacker', 'rosestacker'],
+  ['rosestacker', 'rosestacker'],
   ['rosestacker:', 'rosestacker'],
 
   // SuperiorSkyblock
