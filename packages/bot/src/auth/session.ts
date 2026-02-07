@@ -170,6 +170,7 @@ async function validateTokenWithProfile(
 /**
  * Refresh Microsoft token with multiple client IDs and scopes
  * Uses raw URL-encoded format to match OpSec's approach
+ * IMPORTANT: refreshToken is NOT encoded - it contains special characters that are part of the token format
  */
 async function refreshMicrosoftToken(
   refreshToken: string
@@ -177,8 +178,9 @@ async function refreshMicrosoftToken(
   for (const clientId of AZURE_CLIENT_IDS) {
     for (const scope of SCOPE_COMBOS) {
       try {
-        // Use raw URL-encoded string format (OpSec style) to avoid double-encoding
-        const body = `client_id=${encodeURIComponent(clientId)}&refresh_token=${encodeURIComponent(refreshToken)}&grant_type=refresh_token&redirect_uri=${encodeURIComponent('https://login.live.com/oauth20_desktop.srf')}&scope=${scope}`;
+        // Match OpSec's exact format - only encode clientId and redirectUri
+        // refreshToken and scope are sent AS-IS (they have special chars that are part of the format)
+        const body = `client_id=${encodeURIComponent(clientId)}&refresh_token=${refreshToken}&grant_type=refresh_token&redirect_uri=${encodeURIComponent('https://login.live.com/oauth20_desktop.srf')}&scope=${scope}`;
 
         const response = await fetch(MICROSOFT_TOKEN_URL, {
           method: 'POST',
