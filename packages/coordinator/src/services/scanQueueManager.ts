@@ -1,9 +1,9 @@
 import { eq, and, or, sql, desc, asc } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
-import { scanQueue, servers, agents, taskLogs } from '../db/schema.js';
+import { scanQueue, servers, agents } from '../db/schema.js';
 import type { NewScanQueue, Server, ScanQueue } from '../db/schema.js';
 import { resolveServerIp, PrivateIpError, parseServerAddress } from './ipResolver.js';
-import { allocateResourcesTx, releaseResourcesTx } from './resourceAllocator.js';
+import { allocateResourcesTx } from './resourceAllocator.js';
 
 export interface AddToQueueInput {
   servers: string[];
@@ -264,130 +264,6 @@ export async function getQueueEntries(db: Db, options: QueueEntryOptions = {}): 
 /**
  * Complete a scan - update server history and remove from queue
  */
-export async function completeScan(
-  db: Db,
-  queueId: string,
-  result: unknown,
-  errorMessage?: string
-): Promise<void> {
-  // Use transaction with row-level locking to prevent race conditions
-  await db.transaction(async (tx) => {
-    const [item] = await tx
-      .select()
-      .from(scanQueue)
-      .where(eq(scanQueue.id, queueId))
-      .for('update')
-      .limit(1);
-
-    if (!item) return;
-
-    // Idempotency check: skip if already completed or failed (row is locked, so this is safe)
-    if (item.status === 'completed' || item.status === 'failed') {
-      return;
-    }
-
-    // Release resources
-    if (item.assignedProxyId && item.assignedAccountId) {
-      await releaseResourcesTx(tx, item.assignedProxyId, item.assignedAccountId);
-    }
-
-    // Clear agent's currentQueueId and set status to idle
-    if (item.assignedAgentId) {
-      await tx
-        .update(agents)
-        .set({ currentQueueId: null, status: 'idle' })
-        .where(eq(agents.id, item.assignedAgentId));
-    }
-
-    // Build scan history entry - fetch logs before queue item is deleted
-    const completedAt = new Date();
-    const duration = item.startedAt ? completedAt.getTime() - new Date(item.startedAt).getTime() : null;
-
-    // Fetch all logs for this queue item before deleting it
-    const logs = await tx
-      .select()
-      .from(taskLogs)
-      .where(eq(taskLogs.queueId, queueId))
-      .orderBy(desc(taskLogs.timestamp))
-      .limit(500); // Get up to 500 most recent log lines
-
-    const historyEntry = {
-      timestamp: completedAt.toISOString(),
-      result: errorMessage ? null : result,
-      errorMessage: errorMessage ?? undefined,
-      duration: duration,
-      logs: logs.map(log => ({
-        level: log.level,
-        message: log.message,
-        timestamp: log.timestamp?.toISOString() ?? completedAt.toISOString(),
-      })),
-    };
-
-    // Update or create server record
-    const existingServer = await tx
-      .select()
-      .from(servers)
-      .where(
-        and(
-          eq(servers.resolvedIp, item.resolvedIp ?? ''),
-          eq(servers.port, item.port),
-          // Handle null hostname comparison
-          sql`${servers.hostname} IS NOT DISTINCT FROM ${item.hostname}`
-        )
-      )
-      .limit(1);
-
-    if (existingServer.length > 0) {
-      // Update existing server
-      const server = existingServer[0]!;
-      const currentHistory = (server.scanHistory as unknown as Array<typeof historyEntry>) ?? [];
-      const updatedHistory = [historyEntry, ...currentHistory].slice(0, 100); // Keep last 100 scans
-      await tx
-        .update(servers)
-        .set({
-          lastScannedAt: completedAt,
-          scanCount: sql`${servers.scanCount} + 1`,
-          latestResult: result ? (result as object) : null,
-          scanHistory: updatedHistory as any,
-        })
-        .where(eq(servers.id, server.id));
-    } else {
-      // Create new server record
-      await tx.insert(servers).values({
-        serverAddress: item.serverAddress,
-        hostname: item.hostname,
-        resolvedIp: item.resolvedIp,
-        port: item.port,
-        firstSeenAt: completedAt,
-        lastScannedAt: completedAt,
-        scanCount: 1,
-        latestResult: result ? (result as object) : null,
-        scanHistory: [historyEntry] as any,
-      });
-    }
-
-    // Mark queue item as completed
-    await tx
-      .update(scanQueue)
-      .set({
-        status: errorMessage ? 'failed' : 'completed',
-        errorMessage: errorMessage ?? null,
-        completedAt: completedAt,
-      })
-      .where(eq(scanQueue.id, queueId));
-
-    // Remove from queue (delete completed/failed items after a period, or immediately)
-    await tx.delete(scanQueue).where(eq(scanQueue.id, queueId));
-  });
-}
-
-/**
- * Fail a scan - remove from queue with cleanup
- */
-export async function failScan(db: Db, queueId: string, errorMessage: string): Promise<void> {
-  await completeScan(db, queueId, null, errorMessage);
-}
-
 export interface ServerListOptions {
   limit?: number;
   offset?: number;

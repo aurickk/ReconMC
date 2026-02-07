@@ -1,6 +1,6 @@
 import { eq, and, or, sql, desc, asc } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
-import { scanQueue, servers, agents } from '../db/schema.js';
+import { scanQueue, servers, agents, taskLogs } from '../db/schema.js';
 import type { NewScanQueue, ScanQueue } from '../db/schema.js';
 import { resolveServerIp, PrivateIpError, parseServerAddress } from './ipResolver.js';
 import { allocateResourcesTx, releaseResources } from './resourceAllocator.js';
@@ -567,86 +567,123 @@ export async function completeScan(
 ): Promise<void> {
   const redis = getRedisClient();
 
-  // Get queue item from PostgreSQL
-  const [item] = await db.select().from(scanQueue).where(eq(scanQueue.id, queueId)).limit(1);
-  if (!item) return;
+  // Fetch item data first for Redis cleanup (outside transaction)
+  const [itemData] = await db.select().from(scanQueue).where(eq(scanQueue.id, queueId)).limit(1);
+  if (!itemData) return;
 
-  // Release resources
-  if (item.assignedProxyId && item.assignedAccountId) {
-    await releaseResources(db, item.assignedProxyId, item.assignedAccountId);
-  }
+  // Use transaction with row-level locking to prevent race conditions (duplicates)
+  await db.transaction(async (tx) => {
+    const [item] = await tx
+      .select()
+      .from(scanQueue)
+      .where(eq(scanQueue.id, queueId))
+      .for('update')
+      .limit(1);
 
-  // Clear agent's currentQueueId and set status to idle
-  if (item.assignedAgentId) {
-    await db
-      .update(agents)
-      .set({ currentQueueId: null, status: 'idle' })
-      .where(eq(agents.id, item.assignedAgentId));
-  }
+    if (!item) return;
 
-  // Build scan history entry
-  const historyEntry = {
-    timestamp: new Date().toISOString(),
-    result: errorMessage ? null : result,
-    errorMessage: errorMessage ?? undefined,
-  };
+    // Idempotency check: skip if already completed or failed
+    if (item.status === 'completed' || item.status === 'failed') {
+      return;
+    }
 
-  // Update or create server record
-  const existingServer = await db
-    .select()
-    .from(servers)
-    .where(
-      and(
-        eq(servers.resolvedIp, item.resolvedIp ?? ''),
-        eq(servers.port, item.port),
-        // Handle null hostname comparison
-        sql`${servers.hostname} IS NOT DISTINCT FROM ${item.hostname}`
+    // Release resources (use regular db connection for sub-transaction)
+    if (item.assignedProxyId && item.assignedAccountId) {
+      await releaseResources(db, item.assignedProxyId, item.assignedAccountId);
+    }
+
+    // Clear agent's currentQueueId and set status to idle
+    if (item.assignedAgentId) {
+      await tx
+        .update(agents)
+        .set({ currentQueueId: null, status: 'idle' })
+        .where(eq(agents.id, item.assignedAgentId));
+    }
+
+    // Build scan history entry - use same timestamp for consistency
+    const completedAt = new Date();
+    const duration = item.startedAt ? completedAt.getTime() - new Date(item.startedAt).getTime() : null;
+
+    // Fetch all logs for this queue item before deleting it
+    const logs = await tx
+      .select()
+      .from(taskLogs)
+      .where(eq(taskLogs.queueId, queueId))
+      .orderBy(desc(taskLogs.timestamp))
+      .limit(500); // Get up to 500 most recent log lines
+
+    const historyEntry = {
+      timestamp: completedAt.toISOString(),
+      result: errorMessage ? null : result,
+      errorMessage: errorMessage ?? undefined,
+      duration: duration,
+      logs: logs.map(log => ({
+        level: log.level,
+        message: log.message,
+        timestamp: log.timestamp?.toISOString() ?? completedAt.toISOString(),
+      })),
+    };
+
+    // Update or create server record
+    const existingServer = await tx
+      .select()
+      .from(servers)
+      .where(
+        and(
+          eq(servers.resolvedIp, item.resolvedIp ?? ''),
+          eq(servers.port, item.port),
+          // Handle null hostname comparison
+          sql`${servers.hostname} IS NOT DISTINCT FROM ${item.hostname}`
+        )
       )
-    )
-    .limit(1);
+      .limit(1);
 
-  if (existingServer.length > 0) {
-    // Update existing server
-    const server = existingServer[0]!;
-    const currentHistory = (server.scanHistory as unknown as Array<typeof historyEntry>) ?? [];
-    const updatedHistory = [historyEntry, ...currentHistory].slice(0, 100); // Keep last 100 scans
-    await db
-      .update(servers)
-      .set({
-        lastScannedAt: new Date(),
-        scanCount: sql`${servers.scanCount} + 1`,
+    if (existingServer.length > 0) {
+      // Update existing server
+      const server = existingServer[0]!;
+      const currentHistory = (server.scanHistory as unknown as Array<typeof historyEntry>) ?? [];
+      const updatedHistory = [historyEntry, ...currentHistory].slice(0, 100); // Keep last 100 scans
+      await tx
+        .update(servers)
+        .set({
+          lastScannedAt: completedAt,
+          scanCount: sql`${servers.scanCount} + 1`,
+          latestResult: result ? (result as object) : null,
+          scanHistory: updatedHistory as any,
+        })
+        .where(eq(servers.id, server.id));
+    } else {
+      // Create new server record
+      await tx.insert(servers).values({
+        serverAddress: item.serverAddress,
+        hostname: item.hostname,
+        resolvedIp: item.resolvedIp,
+        port: item.port,
+        firstSeenAt: completedAt,
+        lastScannedAt: completedAt,
+        scanCount: 1,
         latestResult: result ? (result as object) : null,
-        scanHistory: updatedHistory as any,
+        scanHistory: [historyEntry] as any,
+      });
+    }
+
+    // Mark queue item as completed
+    await tx
+      .update(scanQueue)
+      .set({
+        status: errorMessage ? 'failed' : 'completed',
+        errorMessage: errorMessage ?? null,
+        completedAt: completedAt,
       })
-      .where(eq(servers.id, server.id));
-  } else {
-    // Create new server record
-    await db.insert(servers).values({
-      serverAddress: item.serverAddress,
-      hostname: item.hostname,
-      resolvedIp: item.resolvedIp,
-      port: item.port,
-      firstSeenAt: new Date(),
-      lastScannedAt: new Date(),
-      scanCount: 1,
-      latestResult: result ? (result as object) : null,
-      scanHistory: [historyEntry] as any,
-    });
-  }
+      .where(eq(scanQueue.id, queueId));
 
-  // Mark queue item as completed
-  await db
-    .update(scanQueue)
-    .set({
-      status: errorMessage ? 'failed' : 'completed',
-      errorMessage: errorMessage ?? null,
-      completedAt: new Date(),
-    })
-    .where(eq(scanQueue.id, queueId));
+    // Remove from PostgreSQL queue
+    await tx.delete(scanQueue).where(eq(scanQueue.id, queueId));
+  });
 
-  // Remove from Redis processing list and duplicates set
+  // Remove from Redis processing list and duplicates set (outside transaction)
   if (redis && redis.status === 'ready') {
-    const dedupeKey = getDedupeKey(item.resolvedIp ?? '', item.port, item.hostname);
+    const dedupeKey = getDedupeKey(itemData.resolvedIp ?? '', itemData.port, itemData.hostname);
     await safeRedisCommand(async (client) => {
       // Remove the queue item tracking key
       await client.del(REDIS_KEYS.QUEUE_ITEM(queueId));
@@ -655,23 +692,20 @@ export async function completeScan(
       // Remove from processing list by searching for the queue ID in stored items
       // This is O(n) but processing list should be small
       const processingList = await client.lrange(REDIS_KEYS.QUEUE_PROCESSING, 0, -1);
-      for (const item of processingList) {
+      for (const procItem of processingList) {
         try {
-          const parsed = JSON.parse(item);
+          const parsed = JSON.parse(procItem);
           if (parsed.id === queueId) {
-            await client.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, item);
+            await client.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, procItem);
             break;
           }
         } catch {
           // Skip invalid JSON entries
-          await client.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, item);
+          await client.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, procItem);
         }
       }
     });
   }
-
-  // Remove from PostgreSQL queue
-  await db.delete(scanQueue).where(eq(scanQueue.id, queueId));
 }
 
 /**
