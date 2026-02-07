@@ -332,7 +332,7 @@ export async function completeScan(
     await db
       .update(servers)
       .set({
-        lastScannedAt: new Date(),
+        lastScannedAt: completedAt,
         scanCount: sql`${servers.scanCount} + 1`,
         latestResult: result ? (result as object) : null,
         scanHistory: updatedHistory as any,
@@ -345,8 +345,8 @@ export async function completeScan(
       hostname: item.hostname,
       resolvedIp: item.resolvedIp,
       port: item.port,
-      firstSeenAt: new Date(),
-      lastScannedAt: new Date(),
+      firstSeenAt: completedAt,
+      lastScannedAt: completedAt,
       scanCount: 1,
       latestResult: result ? (result as object) : null,
       scanHistory: [historyEntry] as any,

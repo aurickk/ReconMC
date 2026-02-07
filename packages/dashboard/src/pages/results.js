@@ -49,7 +49,7 @@ function formatRelativeTime(dateStr) {
 /**
  * Format scan duration in milliseconds to human-readable string
  */
-function formatDuration(ms: number | null | undefined): string {
+function formatDuration(ms) {
   if (ms == null) return '-';
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
