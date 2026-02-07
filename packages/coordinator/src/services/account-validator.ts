@@ -18,6 +18,8 @@ const REFRESH_LOG_PATH = join(process.cwd(), 'logs', 'token-refresh.log');
 async function logRefresh(message: string): Promise<void> {
   const timestamp = new Date().toISOString();
   const logLine = `[${timestamp}] ${message}\n`;
+  // Also log to console for Docker visibility (using console.error so it shows with warn level)
+  console.error(`[TokenRefresh] ${message}`);
   try {
     await fs.mkdir(join(process.cwd(), 'logs'), { recursive: true });
     await fs.appendFile(REFRESH_LOG_PATH, logLine);
