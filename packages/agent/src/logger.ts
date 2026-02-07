@@ -72,9 +72,14 @@ async function flushLogs() {
 }
 
 function addLog(level: 'info' | 'warn' | 'error', message: string) {
+  // Strip existing level prefixes from message to avoid duplicates like [INFO] [INFO]
+  let cleanMessage = String(message).substring(0, 10000); // Limit message size
+  const levelPrefix = new RegExp(`^\\[${level.toUpperCase()}\\s*`, 'i');
+  cleanMessage = cleanMessage.replace(levelPrefix, '').trim();
+
   const entry: LogEntry = {
     level,
-    message: String(message).substring(0, 10000), // Limit message size
+    message: cleanMessage,
     timestamp: Date.now(),
   };
 
@@ -83,7 +88,7 @@ function addLog(level: 'info' | 'warn' | 'error', message: string) {
   // Also log to original console (not the intercepted one)
   const timestamp = new Date(entry.timestamp).toISOString();
   const originalMethod = level === 'error' ? originalConsole.error : level === 'warn' ? originalConsole.warn : originalConsole.log;
-  originalMethod(`[${timestamp}] [${level.toUpperCase()}]`, message);
+  originalMethod(`[${timestamp}] [${level.toUpperCase()}]`, cleanMessage);
 
   // Auto-flush if buffer is full
   if (logBuffer.length >= MAX_BUFFER_SIZE) {

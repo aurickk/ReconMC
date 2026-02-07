@@ -1076,10 +1076,22 @@ function renderLogs(container, logs) {
     return;
   }
 
-  container.innerHTML = logs.map(log => {
+  // Sort logs by timestamp ascending (oldest first) for chronological view
+  const sortedLogs = [...logs].sort((a, b) =>
+    new Date(a.timestamp || 0).getTime() - new Date(b.timestamp || 0).getTime()
+  );
+
+  container.innerHTML = sortedLogs.map(log => {
+    // Clean up duplicate level prefix (e.g., "[INFO] [INFO]" -> "[INFO]")
+    let message = log.message;
+    const levelPrefix = `[${log.level.toUpperCase()}]`;
+    if (message.startsWith(levelPrefix)) {
+      message = message.substring(levelPrefix.length).trim();
+    }
+
     const levelClass = log.level === 'error' ? 'text-error' : log.level === 'warn' ? 'text-warning' : '';
     const time = log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : '';
-    return `<div class="log-entry ${levelClass}"><span class="log-time">${time}</span> <span class="log-level">[${log.level.toUpperCase()}]</span> <span class="log-message">${escapeHtml(log.message)}</span></div>`;
+    return `<div class="log-entry ${levelClass}"><span class="log-time">${time}</span> <span class="log-level">[${log.level.toUpperCase()}]</span> <span class="log-message">${escapeHtml(message)}</span></div>`;
   }).join('\n');
 
   if (logsAutoScroll) {
