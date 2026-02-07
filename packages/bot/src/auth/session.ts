@@ -55,12 +55,13 @@ const AZURE_CLIENT_IDS = [
 
 /**
  * Scope combinations to try for token refresh
+ * Must match the scopes used when the refresh token was issued
  */
 const SCOPE_COMBOS = [
-  'XboxLive.signin offline_access',
-  'XboxLive.signin%20offline_access',
-  'service::user.auth.xboxlive.com::MBI_SSL',
-  'XboxLive.signin',
+  'XboxLive.signin%20XboxLive.offline_access',  // Full Xbox Live scope (OpSec style)
+  'XboxLive.signin%20offline_access',            // Alternative encoding
+  'service::user.auth.xboxlive.com::MBI_SSL',    // Service-based scope
+  'XboxLive.signin',                             // Minimal scope
 ];
 
 /**
@@ -168,6 +169,7 @@ async function validateTokenWithProfile(
 
 /**
  * Refresh Microsoft token with multiple client IDs and scopes
+ * Uses raw URL-encoded format to match OpSec's approach
  */
 async function refreshMicrosoftToken(
   refreshToken: string
@@ -175,20 +177,15 @@ async function refreshMicrosoftToken(
   for (const clientId of AZURE_CLIENT_IDS) {
     for (const scope of SCOPE_COMBOS) {
       try {
-        const body = new URLSearchParams({
-          client_id: clientId,
-          refresh_token: refreshToken,
-          grant_type: 'refresh_token',
-          redirect_uri: 'https://login.live.com/oauth20_desktop.srf',
-          scope,
-        });
+        // Use raw URL-encoded string format (OpSec style) to avoid double-encoding
+        const body = `client_id=${encodeURIComponent(clientId)}&refresh_token=${encodeURIComponent(refreshToken)}&grant_type=refresh_token&redirect_uri=${encodeURIComponent('https://login.live.com/oauth20_desktop.srf')}&scope=${scope}`;
 
         const response = await fetch(MICROSOFT_TOKEN_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
           },
-          body: body.toString(),
+          body,
         });
 
         if (response.status === 429) {
@@ -198,6 +195,7 @@ async function refreshMicrosoftToken(
         }
 
         if (response.status !== 200) {
+          logger.debug(`[refreshMicrosoftToken] Failed with client ${clientId} scope ${scope}: HTTP ${response.status}`);
           continue; // Try next combination
         }
 
@@ -206,12 +204,13 @@ async function refreshMicrosoftToken(
           refresh_token?: string;
         };
 
-        logger.debug(`[refreshMicrosoftToken] Success with client: ${clientId}`);
+        logger.debug(`[refreshMicrosoftToken] Success with client: ${clientId}, scope: ${scope}`);
         return {
           access_token: data.access_token,
           refresh_token: data.refresh_token,
         };
-      } catch {
+      } catch (err) {
+        logger.debug(`[refreshMicrosoftToken] Error with client ${clientId}: ${err}`);
         continue; // Try next combination
       }
     }
