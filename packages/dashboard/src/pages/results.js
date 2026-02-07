@@ -29,6 +29,21 @@ function getAgentDisplayName(agentId) {
 }
 
 /**
+ * Convert country code to flag emoji
+ * Uses regional indicator symbols to generate flags dynamically
+ */
+function getCountryFlag(countryCode) {
+  if (!countryCode || countryCode.length !== 2) return '';
+  const code = countryCode.toUpperCase();
+  // Regional indicator symbols start at U+1F1E6 (🇦)
+  const base = 0x1F1E6;
+  const aOffset = 'A'.codePointAt(0);
+  const flag = String.fromCodePoint(base + code.codePointAt(0) - aOffset) +
+              String.fromCodePoint(base + code.codePointAt(1) - aOffset);
+  return flag;
+}
+
+/**
  * Format relative time
  */
 function formatRelativeTime(dateStr) {
@@ -849,6 +864,23 @@ function showScanDetail(scan) {
         <div class="detail-section">
           <div class="detail-label">Latency</div>
           <div class="detail-value">${ping.status.latency}ms</div>
+        </div>
+      `;
+    }
+
+    // IP location (geolocation)
+    if (ping.location && Object.keys(ping.location).length > 0) {
+      const loc = ping.location;
+      const locationParts = [
+        loc.countryName,
+        loc.city,
+      ].filter(Boolean);
+      const flag = loc.country ? getCountryFlag(loc.country) : '';
+      const locationText = locationParts.join(', ') || 'Unknown';
+      html += `
+        <div class="detail-section">
+          <div class="detail-label">Location</div>
+          <div class="detail-value">${flag} ${escapeHtml(locationText)}</div>
         </div>
       `;
     }

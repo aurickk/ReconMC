@@ -39,7 +39,6 @@ export interface ValidationResult {
   username?: string;
   profileId?: string;
   error?: string;
-  // New fields for refreshed tokens
   newAccessToken?: string;
   newRefreshToken?: string;
   refreshed?: boolean;
@@ -384,7 +383,6 @@ async function fullRefreshFlow(
     }
   }
 
-  // At this point profileResult.profile is guaranteed to exist
   const profile = profileResult.profile;
   if (!profile) {
     return { success: false, error: 'Profile is undefined after validation' };

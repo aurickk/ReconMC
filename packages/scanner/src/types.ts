@@ -34,6 +34,24 @@ export interface ScanOptions {
 }
 
 /**
+ * IP geolocation information
+ */
+export interface IpLocation {
+  /** Country code (e.g., "US", "GB", "DE") */
+  country?: string;
+  /** Country name */
+  countryName?: string;
+  /** City name */
+  city?: string;
+  /** ISP/Organization */
+  isp?: string;
+  /** Latitude */
+  lat?: number;
+  /** Longitude */
+  lon?: number;
+}
+
+/**
  * Result of a server scan attempt
  */
 export interface ScanResult {
@@ -45,6 +63,8 @@ export interface ScanResult {
   port: number;
   /** The resolved IP address (after DNS resolution) */
   resolvedIp?: string;
+  /** Geolocation information for the resolved IP */
+  location?: IpLocation;
   /** Server status information (if successful) */
   status?: ServerStatus;
   /** Error message (if failed) */

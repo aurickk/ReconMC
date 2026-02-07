@@ -5,7 +5,7 @@
 import { scanServer, detectServerMode } from '@reconmc/scanner';
 import { connectBot } from '@reconmc/bot';
 import type { Account } from '@reconmc/bot';
-import type { ScanResult } from '@reconmc/scanner';
+import type { ScanResult, IpLocation } from '@reconmc/scanner';
 import { logger } from './logger.js';
 
 export interface ProxyConfig {
@@ -80,6 +80,42 @@ function formatServerStatus(status: any): string {
 }
 
 /**
+ * Lookup geolocation for an IP address using a free API
+ */
+async function lookupIpLocation(ip: string): Promise<IpLocation | null> {
+  try {
+    const response = await fetch(`http://ip-api.com/json/${ip}`, {
+      signal: AbortSignal.timeout(5000), // 5 second timeout
+    });
+    if (response.status !== 200) {
+      return null;
+    }
+    const data = await response.json() as {
+      country?: string;
+      countryName?: string;
+      city?: string;
+      isp?: string;
+      lat?: number;
+      lon?: number;
+      status?: string;
+    };
+    if (data.status === 'fail') {
+      return null;
+    }
+    return {
+      country: data.country,
+      countryName: data.countryName,
+      city: data.city,
+      isp: data.isp,
+      lat: data.lat,
+      lon: data.lon,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Run full scan: ping then bot connection with plugin detection.
  */
 export async function runFullScan(input: FullScanInput): Promise<FullScanResult> {
@@ -117,6 +153,18 @@ export async function runFullScan(input: FullScanInput): Promise<FullScanResult>
   } else {
     logger.warn(`[Ping] Failed: ${pingResult.error || 'Unknown error'}`);
     return result;
+  }
+
+  // Lookup IP geolocation if we have a resolved IP
+  if (pingResult.resolvedIp) {
+    const location = await lookupIpLocation(pingResult.resolvedIp);
+    if (location) {
+      pingResult.location = location;
+      const locationStr = location.countryName
+        ? `${location.countryName}${location.city ? `, ${location.city}` : ''}`
+        : location.country || 'Unknown';
+      logger.info(`[Geo] IP location: ${locationStr} (${pingResult.resolvedIp})`);
+    }
   }
 
   // Determine server mode

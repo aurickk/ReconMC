@@ -169,7 +169,6 @@ async function validateTokenWithProfile(
 
 /**
  * Refresh Microsoft token with multiple client IDs and scopes
- * Uses raw URL-encoded format to match OpSec's approach
  * IMPORTANT: refreshToken is NOT encoded - it contains special characters that are part of the token format
  */
 async function refreshMicrosoftToken(
@@ -191,13 +190,11 @@ async function refreshMicrosoftToken(
         });
 
         if (response.status === 429) {
-          logger.debug('[refreshMicrosoftToken] Rate limited, waiting...');
           await new Promise(r => setTimeout(r, 5000));
           continue;
         }
 
         if (response.status !== 200) {
-          logger.debug(`[refreshMicrosoftToken] Failed with client ${clientId} scope ${scope}: HTTP ${response.status}`);
           continue; // Try next combination
         }
 
@@ -206,19 +203,16 @@ async function refreshMicrosoftToken(
           refresh_token?: string;
         };
 
-        logger.debug(`[refreshMicrosoftToken] Success with client: ${clientId}, scope: ${scope}`);
         return {
           access_token: data.access_token,
           refresh_token: data.refresh_token,
         };
-      } catch (err) {
-        logger.debug(`[refreshMicrosoftToken] Error with client ${clientId}: ${err}`);
+      } catch {
         continue; // Try next combination
       }
     }
   }
 
-  logger.error('[refreshMicrosoftToken] All client/scope combinations failed');
   return null;
 }
 
@@ -251,7 +245,6 @@ async function authenticateXboxLive(
       });
 
       if (response.status === 429) {
-        logger.debug('[authenticateXboxLive] Rate limited, waiting...');
         await new Promise(r => setTimeout(r, 5000));
         continue;
       }
@@ -267,11 +260,9 @@ async function authenticateXboxLive(
 
       const userHash = data.DisplayClaims?.xui?.[0]?.uhs;
       if (!userHash) {
-        logger.error('[authenticateXboxLive] No user hash in response');
         continue;
       }
 
-      logger.debug('[authenticateXboxLive] Authentication successful');
       return {
         token: data.Token,
         userHash,
@@ -281,7 +272,6 @@ async function authenticateXboxLive(
     }
   }
 
-  logger.error('[authenticateXboxLive] All ticket formats failed');
   return null;
 }
 
