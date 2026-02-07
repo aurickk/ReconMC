@@ -33,7 +33,18 @@ function getCorsOrigin(allowedOrigins: string[] | undefined) {
 }
 
 export async function createCoordinatorServer(allowedOrigins?: string[]) {
-  const fastify = Fastify({ logger: true, trustProxy: true });
+  // Configure logger to only log errors and slow requests (>1s)
+  const fastify = Fastify({
+    logger: {
+      level: 'warn', // Only log warnings and errors
+      transport: process.env.NODE_ENV === 'development' ? {
+        target: 'pino-pretty',
+        options: { colorize: true }
+      } : undefined
+    },
+    trustProxy: true,
+    disableRequestLogging: true, // Disable automatic request/response logging
+  });
 
   await fastify.register(cors, {
     origin: getCorsOrigin(allowedOrigins),
