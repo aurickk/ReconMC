@@ -273,6 +273,11 @@ export async function completeScan(
   const [item] = await db.select().from(scanQueue).where(eq(scanQueue.id, queueId)).limit(1);
   if (!item) return;
 
+  // Idempotency check: skip if already completed or failed
+  if (item.status === 'completed' || item.status === 'failed') {
+    return;
+  }
+
   // Release resources
   if (item.assignedProxyId && item.assignedAccountId) {
     await releaseResources(db, item.assignedProxyId, item.assignedAccountId);
