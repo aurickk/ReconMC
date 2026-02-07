@@ -76,14 +76,16 @@ export async function taskRoutes(fastify: FastifyInstance) {
       return reply.code(404).send({ error: 'Queue item not found' });
     }
 
-    // Insert log entries with sanitized messages
-    for (const log of logs) {
-      await db.insert(taskLogs).values({
-        queueId: id,
-        agentId,
-        level: log.level || 'info',
-        message: sanitizeLogMessage(log.message),
-      } as NewTaskLog);
+    // Insert log entries with sanitized messages (bulk insert)
+    if (logs.length > 0) {
+      await db.insert(taskLogs).values(
+        logs.map(log => ({
+          queueId: id,
+          agentId,
+          level: log.level || 'info',
+          message: sanitizeLogMessage(log.message),
+        } as NewTaskLog))
+      );
     }
 
     return reply.code(200).send({ ok: true, received: logs.length });

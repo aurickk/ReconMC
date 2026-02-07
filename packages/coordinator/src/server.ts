@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
+import compress from '@fastify/compress';
 import { runMigrations } from './db/migrate.js';
 import { taskRoutes } from './routes/tasks.js';
 import { serverRoutes } from './routes/servers.js';
@@ -50,6 +51,9 @@ export async function createCoordinatorServer(allowedOrigins?: string[]) {
     origin: getCorsOrigin(allowedOrigins),
     credentials: true
   });
+
+  // Enable response compression (gzip, deflate) for JSON payloads
+  await fastify.register(compress, { encodings: ['gzip', 'deflate'] });
 
   // Register /api/health BEFORE other routes so it stays public (no auth required)
   fastify.get('/api/health', async (_request, reply) => {
