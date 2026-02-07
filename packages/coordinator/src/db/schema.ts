@@ -91,7 +91,7 @@ export const servers = pgTable('servers', {
   lastScannedAt: timestamp('last_scanned_at'),
   scanCount: integer('scan_count').default(0).notNull(),
   latestResult: jsonb('latest_result'),
-  scanHistory: jsonb('scan_history').default([]).$type<{ timestamp: string; result: unknown; errorMessage?: string }[]>(),
+  scanHistory: jsonb('scan_history').default([]).$type<{ timestamp: string; result: unknown; errorMessage?: string; duration?: number | null }[]>(),
 }, (table) => ({
   uniqueServer: unique('servers_unique').on(table.resolvedIp, table.port, table.hostname),
 }));

@@ -287,10 +287,14 @@ export async function completeScan(
   }
 
   // Build scan history entry
+  const completedAt = new Date();
+  const duration = item.startedAt ? completedAt.getTime() - new Date(item.startedAt).getTime() : null;
+
   const historyEntry = {
-    timestamp: new Date().toISOString(),
+    timestamp: completedAt.toISOString(),
     result: errorMessage ? null : result,
     errorMessage: errorMessage ?? undefined,
+    duration: duration,
   };
 
   // Update or create server record

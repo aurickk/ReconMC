@@ -47,6 +47,16 @@ function formatRelativeTime(dateStr) {
 }
 
 /**
+ * Format scan duration in milliseconds to human-readable string
+ */
+function formatDuration(ms: number | null | undefined): string {
+  if (ms == null) return '-';
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
+}
+
+/**
  * Parse Minecraft text component to plain text
  */
 function parseDescription(description) {
@@ -651,6 +661,7 @@ function renderServerHistory(container) {
       const statusIcon = isOnline ? '✓' : '✗';
       const statusClass = isOnline ? 'online' : 'offline';
       const time = scan.timestamp ? formatRelativeTime(scan.timestamp) : 'Unknown';
+      const duration = scan.duration != null ? formatDuration(scan.duration) : null;
       const timestampAttr = scan.timestamp ? escapeHtml(scan.timestamp) : '';
 
       return `
@@ -664,7 +675,7 @@ function renderServerHistory(container) {
           </div>
           <div class="task-meta">
             <span class="task-duration text-muted">
-              <small>${time}</small>
+              <small>${time}${duration !== null ? ` • ${duration}` : ''}</small>
             </span>
           </div>
         </div>
