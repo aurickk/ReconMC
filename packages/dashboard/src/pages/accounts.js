@@ -79,6 +79,10 @@ async function loadAccounts() {
       const lastValidated = account.lastValidatedAt
         ? new Date(account.lastValidatedAt).toLocaleDateString()
         : 'never';
+      const validationError = account.lastValidationError;
+      const invalidTitle = validationError
+        ? `Last validated: ${lastValidated}. Error: ${validationError}`
+        : `Last validated: ${lastValidated}`;
 
       return `
         <tr>
@@ -87,7 +91,7 @@ async function loadAccounts() {
           <td>${account.currentUsage || 0}/${account.maxConcurrent || 3}</td>
           <td><span class="badge ${account.isActive ? 'completed' : 'offline'}">${account.isActive ? 'active' : 'inactive'}</span></td>
           <td>
-            <span class="badge ${isValid ? 'completed' : 'offline'}" title="Last validated: ${lastValidated}">
+            <span class="badge ${isValid ? 'completed' : 'offline'}" title="${isValid ? `Last validated: ${lastValidated}` : invalidTitle}">
               ${isValid ? 'Valid' : 'Invalid'}
             </span>
             ${account.type === 'microsoft' ? `

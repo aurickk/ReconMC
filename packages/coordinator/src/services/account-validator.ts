@@ -330,27 +330,37 @@ async function authenticateMinecraft(
   return null;
 }
 
+interface RefreshError {
+  step: string;
+  error: string;
+}
+
 /**
  * Full refresh flow: Microsoft -> Xbox Live -> XSTS -> Minecraft
  */
 async function fullRefreshFlow(
   refreshToken: string
 ): Promise<{ accessToken: string; refreshToken: string; profile: { id: string; name: string } } | null> {
+  const errors: RefreshError[] = [];
+
   // Step 1: Refresh Microsoft token
   const msToken = await refreshMicrosoftToken(refreshToken);
   if (!msToken) {
+    errors.push({ step: 'Microsoft Token Refresh', error: 'Failed to refresh access token (all client/scope combinations failed)' });
     return null;
   }
 
   // Step 2: Authenticate with Xbox Live
   const xblResponse = await authenticateXboxLive(msToken.access_token);
   if (!xblResponse) {
+    errors.push({ step: 'Xbox Live Auth', error: 'Failed to authenticate with Xbox Live (all ticket formats failed)' });
     return null;
   }
 
   // Step 3: Get XSTS token
   const xstsResponse = await getXSTSToken(xblResponse.token);
   if (!xstsResponse) {
+    errors.push({ step: 'XSTS Token', error: 'Failed to get XSTS token (account may not have Xbox Live)' });
     return null;
   }
 
@@ -360,6 +370,7 @@ async function fullRefreshFlow(
     xstsResponse.token
   );
   if (!mcAccessToken) {
+    errors.push({ step: 'Minecraft Auth', error: 'Failed to authenticate with Minecraft services' });
     return null;
   }
 
@@ -382,13 +393,17 @@ async function fullRefreshFlow(
         profile: extractedProfile,
       };
     } else {
+      errors.push({ step: 'Profile Validation', error: profileResult.error ?? 'Failed to validate Minecraft profile' });
       return null;
     }
   }
 
   // At this point profileResult.profile is guaranteed to exist
   const profile = profileResult.profile;
-  if (!profile) return null;
+  if (!profile) {
+    errors.push({ step: 'Profile', error: 'Profile is undefined after validation' });
+    return null;
+  }
 
   return {
     accessToken: mcAccessToken,
@@ -425,6 +440,13 @@ export async function validateMicrosoftAccount(
 
   // Access token is invalid/expired - try refresh if available
   if ((validation.statusCode === 401 || validation.statusCode === 403) && refreshToken) {
+    if (!refreshToken || refreshToken.length === 0) {
+      return {
+        valid: false,
+        error: 'Access token expired but no refresh token available',
+      };
+    }
+
     const refreshResult = await fullRefreshFlow(refreshToken);
 
     if (refreshResult) {
@@ -440,7 +462,7 @@ export async function validateMicrosoftAccount(
 
     return {
       valid: false,
-      error: 'Token refresh failed - refresh token may be expired',
+      error: 'Token refresh failed - refresh token may be expired or account does not own Minecraft',
     };
   }
 

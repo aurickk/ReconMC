@@ -403,19 +403,25 @@ async function fullRefreshFlow(
   // Step 1: Refresh Microsoft token
   const msToken = await refreshMicrosoftToken(refreshToken);
   if (!msToken) {
-    return { success: false, error: 'Failed to refresh Microsoft token' };
+    logger.error('[fullRefreshFlow] Failed at step 1: Microsoft token refresh (all client/scope combinations failed)');
+    return {
+      success: false,
+      error: 'Failed to refresh Microsoft token. The refresh token may be expired (refresh tokens expire after ~90 days of non-use). Please re-authenticate the account.'
+    };
   }
 
   // Step 2: Authenticate with Xbox Live
   const xblResponse = await authenticateXboxLive(msToken.access_token);
   if (!xblResponse) {
+    logger.error('[fullRefreshFlow] Failed at step 2: Xbox Live authentication (all ticket formats failed)');
     return { success: false, error: 'Failed to authenticate with Xbox Live' };
   }
 
   // Step 3: Get XSTS token
   const xstsResponse = await getXSTSToken(xblResponse.token);
   if (!xstsResponse) {
-    return { success: false, error: 'Failed to get XSTS token' };
+    logger.error('[fullRefreshFlow] Failed at step 3: XSTS token (account may not own Minecraft or does not have Xbox Live)');
+    return { success: false, error: 'Failed to get XSTS token. The account may not own Minecraft or does not have an Xbox Live account.' };
   }
 
   // Step 4: Authenticate with Minecraft
@@ -424,20 +430,21 @@ async function fullRefreshFlow(
     xstsResponse.token
   );
   if (!mcAccessToken) {
-    return { success: false, error: 'Failed to authenticate with Minecraft' };
+    logger.error('[fullRefreshFlow] Failed at step 4: Minecraft authentication');
+    return { success: false, error: 'Failed to authenticate with Minecraft services' };
   }
 
   // Step 5: Validate and get profile
   // If rate limited, try to extract profile from the token or retry
   let profileResult = await validateTokenWithProfile(mcAccessToken);
-  
+
   // If rate limited, wait and retry once
   if (profileResult.statusCode === 429) {
     logger.debug('[fullRefreshFlow] Rate limited, waiting 5 seconds before retry...');
     await new Promise(r => setTimeout(r, 5000));
     profileResult = await validateTokenWithProfile(mcAccessToken);
   }
-  
+
   // If still failing, try to extract profile from the token itself
   if (!profileResult.valid || !profileResult.profile) {
     const extractedProfile = extractProfileFromSessionToken(mcAccessToken);
@@ -449,7 +456,8 @@ async function fullRefreshFlow(
         profile: extractedProfile,
       };
     } else {
-      return { success: false, error: `Failed to validate Minecraft token: ${profileResult.error ?? 'unknown'}` };
+      logger.error(`[fullRefreshFlow] Failed at step 5: Profile validation - ${profileResult.error ?? 'unknown'}`);
+      return { success: false, error: `Failed to validate Minecraft profile: ${profileResult.error ?? 'unknown error'}` };
     }
   }
 
@@ -534,7 +542,16 @@ export async function authenticateWithToken(
       return result;
     }
 
-    // Other error or no refresh token available
+    // No refresh token available - provide helpful error message
+    if (!account.refreshToken) {
+      logger.error('[authenticateWithToken] Token expired but no refresh token available');
+      return {
+        success: false,
+        error: 'Access token expired and no refresh token available. Please re-authenticate the account.',
+      };
+    }
+
+    // Other error
     return {
       success: false,
       error: validation.error ?? 'Token validation failed',

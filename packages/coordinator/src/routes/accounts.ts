@@ -18,6 +18,7 @@ export async function accountRoutes(fastify: FastifyInstance) {
       isActive: accounts.isActive,
       isValid: accounts.isValid,
       lastValidatedAt: accounts.lastValidatedAt,
+      lastValidationError: accounts.lastValidationError,
       lastUsedAt: accounts.lastUsedAt,
       createdAt: accounts.createdAt,
     }).from(accounts);
@@ -136,12 +137,20 @@ export async function accountRoutes(fastify: FastifyInstance) {
       const [existing] = await db.select().from(accounts).where(eq(accounts.id, request.params.id)).limit(1);
       if (!existing) return reply.code(404).send({ error: 'Account not found' });
 
+      fastify.log.info(`[Accounts] Validating account ${request.params.id} (type: ${existing.type})`);
+
       const validation = await validateAccount(
         existing.type,
         existing.accessToken,
         existing.username,
         existing.refreshToken
       );
+
+      if (validation.valid) {
+        fastify.log.info(`[Accounts] Account ${request.params.id} validated successfully: ${validation.username}${validation.refreshed ? ' (tokens refreshed)' : ''}`);
+      } else {
+        fastify.log.warn(`[Accounts] Account ${request.params.id} validation failed: ${validation.error}`);
+      }
 
       const [updated] = await db
         .update(accounts)

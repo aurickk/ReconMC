@@ -183,6 +183,8 @@ export async function runWorker(): Promise<void> {
 
       // Set up token refresh callback for Microsoft accounts
       if (acc.type === 'microsoft') {
+        // Clear any previous callback before setting a new one
+        clearTokenRefreshCallback();
         setTokenRefreshCallback(accountId, (id: string, tokens: { accessToken: string; refreshToken?: string }) => {
           return reportRefreshedTokens(base, id, tokens);
         });
@@ -246,10 +248,9 @@ export async function runWorker(): Promise<void> {
       // Flush logs before failing the task
       await clearTaskContext();
       await failTask(base, queueId, message);
-    } finally {
-      // Clear the token refresh callback
-      clearTokenRefreshCallback();
     }
+    // Note: Token refresh callback persists across tasks for the same account
+    // It's only cleared when a different account is assigned or agent shuts down
 
     await heartbeat(base, 'idle');
     lastHeartbeat = Date.now();
