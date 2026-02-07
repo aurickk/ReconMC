@@ -4,29 +4,11 @@
  * Includes token refresh capability for expired access tokens
  */
 
-import { promises as fs } from 'fs';
-import { join } from 'path';
-
 const MC_PROFILE_URL = 'https://api.minecraftservices.com/minecraft/profile';
 const MICROSOFT_TOKEN_URL = 'https://login.live.com/oauth20_token.srf';
 const XBL_AUTH_URL = 'https://user.auth.xboxlive.com/user/authenticate';
 const XSTS_AUTH_URL = 'https://xsts.auth.xboxlive.com/xsts/authorize';
 const MC_LOGIN_URL = 'https://api.minecraftservices.com/authentication/login_with_xbox';
-
-// Simple file logger for token refresh debugging
-const REFRESH_LOG_PATH = join(process.cwd(), 'logs', 'token-refresh.log');
-async function logRefresh(message: string): Promise<void> {
-  const timestamp = new Date().toISOString();
-  const logLine = `[${timestamp}] ${message}\n`;
-  // Also log to console for Docker visibility (using console.error so it shows with warn level)
-  console.error(`[TokenRefresh] ${message}`);
-  try {
-    await fs.mkdir(join(process.cwd(), 'logs'), { recursive: true });
-    await fs.appendFile(REFRESH_LOG_PATH, logLine);
-  } catch {
-    // Ignore file logging errors
-  }
-}
 
 // Azure client IDs to try for token refresh
 const AZURE_CLIENT_IDS = [
@@ -143,14 +125,11 @@ async function validateTokenWithProfile(
 
 /**
  * Refresh Microsoft token with multiple client IDs and scopes
- * Uses raw URL-encoded format to match OpSec's approach
  * IMPORTANT: refreshToken is NOT encoded - it contains special characters that are part of the token format
  */
 async function refreshMicrosoftToken(
   refreshToken: string
 ): Promise<{ access_token: string; refresh_token?: string } | null> {
-  await logRefresh('=== Starting Microsoft token refresh ===');
-
   for (const clientId of AZURE_CLIENT_IDS) {
     for (const scope of SCOPE_COMBOS) {
       try {
@@ -167,14 +146,11 @@ async function refreshMicrosoftToken(
         });
 
         if (response.status === 429) {
-          await logRefresh(`Rate limited on client ${clientId} scope ${scope}`);
           await new Promise(r => setTimeout(r, 5000));
           continue;
         }
 
         if (response.status !== 200) {
-          const responseText = await response.text();
-          await logRefresh(`FAILED client ${clientId} scope ${scope}: HTTP ${response.status} - ${responseText.substring(0, 200)}`);
           continue; // Try next combination
         }
 
@@ -183,19 +159,16 @@ async function refreshMicrosoftToken(
           refresh_token?: string;
         };
 
-        await logRefresh(`SUCCESS with client ${clientId} scope ${scope}`);
         return {
           access_token: data.access_token,
           refresh_token: data.refresh_token,
         };
-      } catch (err) {
-        await logRefresh(`EXCEPTION with client ${clientId}: ${err}`);
+      } catch {
         continue; // Try next combination
       }
     }
   }
 
-  await logRefresh('FAILED: All client/scope combinations failed');
   return null;
 }
 
@@ -229,14 +202,11 @@ async function authenticateXboxLive(
       });
 
       if (response.status === 429) {
-        await logRefresh(`Xbox Live: Rate limited on format ${i}`);
         await new Promise(r => setTimeout(r, 5000));
         continue;
       }
 
       if (response.status !== 200) {
-        const responseText = await response.text();
-        await logRefresh(`Xbox Live: Format ${i} failed HTTP ${response.status} - ${responseText.substring(0, 150)}`);
         continue; // Try next format
       }
 
@@ -247,22 +217,18 @@ async function authenticateXboxLive(
 
       const userHash = data.DisplayClaims?.xui?.[0]?.uhs;
       if (!userHash) {
-        await logRefresh(`Xbox Live: Format ${i} failed - no user hash`);
         continue;
       }
 
-      await logRefresh(`Xbox Live: Success with format ${i}`);
       return {
         token: data.Token,
         userHash,
       };
-    } catch (err) {
-      await logRefresh(`Xbox Live: Format ${i} exception - ${err}`);
+    } catch {
       continue; // Try next format
     }
   }
 
-  await logRefresh('Xbox Live: All formats failed');
   return null;
 }
 
@@ -291,13 +257,10 @@ async function getXSTSToken(
     });
 
     if (response.status === 401) {
-      await logRefresh('XSTS: HTTP 401 - No Xbox account');
       return null;
     }
 
     if (response.status !== 200) {
-      const responseText = await response.text();
-      await logRefresh(`XSTS: HTTP ${response.status} - ${responseText.substring(0, 150)}`);
       return null;
     }
 
@@ -308,17 +271,14 @@ async function getXSTSToken(
 
     const userHash = data.DisplayClaims?.xui?.[0]?.uhs;
     if (!userHash) {
-      await logRefresh('XSTS: No user hash in response');
       return null;
     }
 
-    await logRefresh('XSTS: Success');
     return {
       token: data.Token,
       userHash,
     };
-  } catch (err) {
-    await logRefresh(`XSTS: Exception - ${err}`);
+  } catch {
     return null;
   }
 }
@@ -346,22 +306,17 @@ async function authenticateMinecraft(
 
       if (response.status === 429) {
         const waitTime = attempt * 5000;
-        await logRefresh(`Minecraft: Rate limited attempt ${attempt}/${retries}, waiting ${waitTime}ms`);
         await new Promise(r => setTimeout(r, waitTime));
         continue;
       }
 
       if (response.status !== 200) {
-        const responseText = await response.text();
-        await logRefresh(`Minecraft: HTTP ${response.status} - ${responseText.substring(0, 150)}`);
         return null;
       }
 
       const data = await response.json() as { access_token: string };
-      await logRefresh('Minecraft: Success');
       return data.access_token;
-    } catch (err) {
-      await logRefresh(`Minecraft: Exception attempt ${attempt}/${retries} - ${err}`);
+    } catch {
       if (attempt < retries) {
         await new Promise(r => setTimeout(r, 2000));
         continue;
@@ -379,31 +334,23 @@ async function authenticateMinecraft(
 async function fullRefreshFlow(
   refreshToken: string
 ): Promise<{ success: true; accessToken: string; refreshToken: string; profile: { id: string; name: string } } | { success: false; error: string }> {
-  await logRefresh('=== Full refresh flow started ===');
-
   // Step 1: Refresh Microsoft token
   const msToken = await refreshMicrosoftToken(refreshToken);
   if (!msToken) {
-    await logRefresh('Step 1 FAILED: Microsoft token refresh');
     return { success: false, error: 'Failed to refresh Microsoft token (all client/scope combinations failed). The refresh token may be expired.' };
   }
-  await logRefresh('Step 1 SUCCESS: Got Microsoft access token');
 
   // Step 2: Authenticate with Xbox Live
   const xblResponse = await authenticateXboxLive(msToken.access_token);
   if (!xblResponse) {
-    await logRefresh('Step 2 FAILED: Xbox Live auth');
     return { success: false, error: 'Failed to authenticate with Xbox Live (all ticket formats failed)' };
   }
-  await logRefresh('Step 2 SUCCESS: Authenticated with Xbox Live');
 
   // Step 3: Get XSTS token
   const xstsResponse = await getXSTSToken(xblResponse.token);
   if (!xstsResponse) {
-    await logRefresh('Step 3 FAILED: XSTS token');
     return { success: false, error: 'Failed to get XSTS token. The account may not own Minecraft or does not have Xbox Live.' };
   }
-  await logRefresh('Step 3 SUCCESS: Got XSTS token');
 
   // Step 4: Authenticate with Minecraft
   const mcAccessToken = await authenticateMinecraft(
@@ -411,17 +358,14 @@ async function fullRefreshFlow(
     xstsResponse.token
   );
   if (!mcAccessToken) {
-    await logRefresh('Step 4 FAILED: Minecraft auth');
     return { success: false, error: 'Failed to authenticate with Minecraft services' };
   }
-  await logRefresh('Step 4 SUCCESS: Got Minecraft access token');
 
   // Step 5: Validate and get profile
   let profileResult = await validateTokenWithProfile(mcAccessToken);
 
   // If rate limited, wait and retry once
   if (profileResult.statusCode === 429) {
-    await logRefresh('Step 5: Rate limited, waiting 5 seconds...');
     await new Promise(r => setTimeout(r, 5000));
     profileResult = await validateTokenWithProfile(mcAccessToken);
   }
@@ -430,18 +374,14 @@ async function fullRefreshFlow(
   if (!profileResult.valid || !profileResult.profile) {
     const extractedProfile = extractProfileFromSessionToken(mcAccessToken);
     if (extractedProfile) {
-      await logRefresh(`Step 5 SUCCESS: Extracted profile from token: ${extractedProfile.name}`);
       profileResult = {
         valid: true,
         statusCode: 200,
         profile: extractedProfile,
       };
     } else {
-      await logRefresh(`Step 5 FAILED: Profile validation - ${profileResult.error ?? 'unknown'}`);
       return { success: false, error: `Failed to validate Minecraft profile: ${profileResult.error ?? 'unknown error'}` };
     }
-  } else {
-    await logRefresh(`Step 5 SUCCESS: Got profile: ${profileResult.profile.name}`);
   }
 
   // At this point profileResult.profile is guaranteed to exist
@@ -450,7 +390,6 @@ async function fullRefreshFlow(
     return { success: false, error: 'Profile is undefined after validation' };
   }
 
-  await logRefresh(`=== Full refresh flow COMPLETE: ${profile.name} ===`);
   return {
     success: true,
     accessToken: mcAccessToken,
