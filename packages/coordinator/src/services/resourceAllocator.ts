@@ -68,19 +68,25 @@ export async function releaseResources(
   proxyId: string,
   accountId: string
 ): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx
-      .update(proxies)
-      .set({
-        currentUsage: sql`${proxies.currentUsage} - 1`,
-      })
-      .where(eq(proxies.id, proxyId));
+  await db.transaction(async (tx) => releaseResourcesTx(tx, proxyId, accountId));
+}
 
-    await tx
-      .update(accounts)
-      .set({
-        currentUsage: sql`${accounts.currentUsage} - 1`,
-      })
-      .where(eq(accounts.id, accountId));
-  });
+export async function releaseResourcesTx(
+  tx: Tx,
+  proxyId: string,
+  accountId: string
+): Promise<void> {
+  await tx
+    .update(proxies)
+    .set({
+      currentUsage: sql`${proxies.currentUsage} - 1`,
+    })
+    .where(eq(proxies.id, proxyId));
+
+  await tx
+    .update(accounts)
+    .set({
+      currentUsage: sql`${accounts.currentUsage} - 1`,
+    })
+    .where(eq(accounts.id, accountId));
 }
