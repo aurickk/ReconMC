@@ -56,10 +56,11 @@ export interface QueueEntryOptions {
 }
 
 /**
- * Generate a unique key for deduplication based on resolvedIp + port + hostname
+ * Generate a unique key for deduplication based on resolvedIp + port only.
+ * This allows multiple hostnames resolving to the same IP to be grouped together.
  */
-function getDedupeKey(resolvedIp: string, port: number, hostname: string | null): string {
-  return `${resolvedIp}:${port}:${hostname ?? ''}`;
+function getDedupeKey(resolvedIp: string, port: number, _hostname: string | null): string {
+  return `${resolvedIp}:${port}`;
 }
 
 /**
@@ -624,25 +625,36 @@ export async function completeScan(
       })),
     };
 
-    // Update or create server record
+    // Update or create server record - group by resolvedIp + port only
     const existingServer = await tx
       .select()
       .from(servers)
       .where(
         and(
           eq(servers.resolvedIp, item.resolvedIp ?? ''),
-          eq(servers.port, item.port),
-          // Handle null hostname comparison
-          sql`${servers.hostname} IS NOT DISTINCT FROM ${item.hostname}`
+          eq(servers.port, item.port)
         )
       )
       .limit(1);
 
     if (existingServer.length > 0) {
-      // Update existing server
+      // Update existing server - append hostname to hostnames array if new
       const server = existingServer[0]!;
       const currentHistory = (server.scanHistory as unknown as Array<typeof historyEntry>) ?? [];
       const updatedHistory = [historyEntry, ...currentHistory].slice(0, 100); // Keep last 100 scans
+
+      // Get current hostnames array, or initialize from legacy hostname field
+      const currentHostnames: string[] = Array.isArray(server.hostnames)
+        ? server.hostnames as string[]
+        : (server.hostname ? [server.hostname] : []);
+
+      // Add new hostname if it exists and isn't already in the array
+      const newHostnames = item.hostname
+        ? (currentHostnames.includes(item.hostname)
+          ? currentHostnames
+          : [...currentHostnames, item.hostname])
+        : currentHostnames;
+
       await tx
         .update(servers)
         .set({
@@ -650,15 +662,20 @@ export async function completeScan(
           scanCount: sql`${servers.scanCount} + 1`,
           latestResult: result ? (result as object) : null,
           scanHistory: updatedHistory as any,
+          hostnames: newHostnames as any,
+          // Only set primaryHostname if not already set
+          ...(server.primaryHostname ? {} : { primaryHostname: item.hostname }),
         })
         .where(eq(servers.id, server.id));
     } else {
-      // Create new server record
+      // Create new server record with hostname tracking
       await tx.insert(servers).values({
         serverAddress: item.serverAddress,
         hostname: item.hostname,
         resolvedIp: item.resolvedIp,
         port: item.port,
+        hostnames: item.hostname ? [item.hostname] : [],
+        primaryHostname: item.hostname ?? null,
         firstSeenAt: completedAt,
         lastScannedAt: completedAt,
         scanCount: 1,

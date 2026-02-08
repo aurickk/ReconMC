@@ -57,12 +57,12 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
     })
   );
 
-  // Deduplicate by resolvedIp + port + hostname within this batch
+  // Deduplicate by resolvedIp + port only (allow multiple hostnames per IP)
   const seenKeys = new Set<string>();
   const uniqueResolved: typeof resolved = [];
   for (const r of resolved) {
     if (!r || !r.address) continue;
-    const key = `${r.resolvedIp}:${r.port}:${r.hostname ?? ''}`;
+    const key = `${r.resolvedIp}:${r.port}`;
     if (seenKeys.has(key)) continue;
     seenKeys.add(key);
     uniqueResolved.push(r);
@@ -70,12 +70,12 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
 
   // Get existing entries in scan_queue (pending or processing)
   const existingQueue = await db
-    .select({ resolvedIp: scanQueue.resolvedIp, port: scanQueue.port, hostname: scanQueue.hostname })
+    .select({ resolvedIp: scanQueue.resolvedIp, port: scanQueue.port })
     .from(scanQueue)
     .where(or(eq(scanQueue.status, 'pending'), eq(scanQueue.status, 'processing')));
 
   const queueKeys = new Set(
-    existingQueue.map((r) => `${r.resolvedIp}:${r.port}:${r.hostname ?? ''}`)
+    existingQueue.map((r) => `${r.resolvedIp}:${r.port}`)
   );
 
   const added: Array<{ id: string; serverAddress: string; resolvedIp: string; port: number }> = [];
@@ -83,7 +83,7 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
 
   for (const r of uniqueResolved) {
     if (!r) continue;
-    const key = `${r.resolvedIp}:${r.port}:${r.hostname ?? ''}`;
+    const key = `${r.resolvedIp}:${r.port}`;
     if (queueKeys.has(key)) {
       skipped++;
       continue;

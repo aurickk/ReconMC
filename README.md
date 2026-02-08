@@ -5,6 +5,19 @@
 
 Minecraft server scanner with a coordinator API, scanning agents, Discord bot, and web dashboard.
 
+## Features
+
+- **Scalable Scanning** - Coordinator/agent architecture supporting 1k-100k servers
+- **Performance Optimized** - Database indexes, response compression, bulk operations
+- **Redis-Accelerated** - O(1) queue operations with PostgreSQL fallback
+- **Proxy Rotation** - SOCKS4/5 proxy support with connection pooling
+- **Account Pooling** - Microsoft and cracked account management with validation
+- **REST API** - Full JSON API with gzipped responses
+
+## Documentation
+
+- [API Documentation](./packages/coordinator/API.md) - Complete REST API reference
+
 # WORK IN PROGRESS
 
 # Basic Setup

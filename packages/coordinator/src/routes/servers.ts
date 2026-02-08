@@ -60,8 +60,9 @@ export async function serverRoutes(fastify: FastifyInstance) {
 
   /**
    * GET /api/servers/by-address/:address
-   * Get server by address (hostname:port or hostname)
+   * Get server by address (hostname:port, hostname, or IP:port)
    * This is useful for Discord bot to find scan results without pagination
+   * With IP-based grouping, this will return the server if any hostname or the IP matches
    */
   fastify.get<{ Params: { address: string } }>(
     '/servers/by-address/:address',
@@ -73,14 +74,32 @@ export async function serverRoutes(fastify: FastifyInstance) {
         const host = hostPart ?? address;
         const port = portPart ? parseInt(portPart, 10) : 25565;
 
-        // Try exact match first, then match by hostname + port
+        // Import resolveServerIp to resolve hostname to IP for lookup
+        const { resolveServerIp } = await import('../services/ipResolver.js');
+
+        let resolvedIp = host;
+        try {
+          // Try to resolve to IP if hostname was provided
+          resolvedIp = await resolveServerIp(host);
+        } catch {
+          // Resolution failed, use original host
+          resolvedIp = host;
+        }
+
+        // Match by resolvedIp + port (IP-based grouping)
+        // Also check if hostname is in the hostnames array
         const [server] = await db
           .select()
           .from(servers)
           .where(
             or(
-              eq(servers.serverAddress, address),
-              sql`${servers.hostname} = ${host} AND ${servers.port} = ${port}`
+              // Direct IP + port match
+              and(
+                eq(servers.resolvedIp, resolvedIp),
+                eq(servers.port, port)
+              ),
+              // Or hostname in hostnames array + port match
+              sql<`${string}:${number}`>`(${servers.hostnames})::jsonb ? ${host} AND ${servers.port} = ${port}`
             )
           )
           .limit(1);
@@ -88,6 +107,8 @@ export async function serverRoutes(fastify: FastifyInstance) {
         if (!server) {
           return reply.code(404).send({ error: 'Server not found' });
         }
+
+        // Return server with all hostnames
         return reply.send(server);
       } catch (err) {
         fastify.log.error(err);

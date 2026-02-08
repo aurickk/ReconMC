@@ -78,7 +78,8 @@ export const scanQueue = pgTable('scan_queue', {
   startedAt: timestamp('started_at'),
   completedAt: timestamp('completed_at'),
 }, (table) => ({
-  uniqueEntry: unique('idx_scan_queue_unique').on(table.resolvedIp, table.port, table.hostname),
+  // Group by resolved IP + port only, not by hostname
+  uniqueEntry: unique('idx_scan_queue_unique').on(table.resolvedIp, table.port),
 }));
 
 export const servers = pgTable('servers', {
@@ -87,13 +88,17 @@ export const servers = pgTable('servers', {
   hostname: varchar('hostname', { length: 255 }),
   resolvedIp: varchar('resolved_ip', { length: 45 }),
   port: integer('port').default(25565).notNull(),
+  hostnames: jsonb('hostnames').default([]).$type<string[]>(), // All discovered hostnames for this IP
+  primaryHostname: varchar('primary_hostname', { length: 255 }), // First discovered hostname
   firstSeenAt: timestamp('first_seen_at').defaultNow().notNull(),
   lastScannedAt: timestamp('last_scanned_at'),
   scanCount: integer('scan_count').default(0).notNull(),
   latestResult: jsonb('latest_result'),
   scanHistory: jsonb('scan_history').default([]).$type<{ timestamp: string; result: unknown; errorMessage?: string; duration?: number | null; logs?: Array<{ level: string; message: string; timestamp: string }> }[]>(),
 }, (table) => ({
-  uniqueServer: unique('servers_unique').on(table.resolvedIp, table.port, table.hostname),
+  // Group by resolved IP + port only, not by hostname
+  // This allows multiple hostnames resolving to the same IP to be treated as one server
+  uniqueServer: unique('servers_unique').on(table.resolvedIp, table.port),
 }));
 
 export type TaskLog = typeof taskLogs.$inferSelect;
