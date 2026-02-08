@@ -8,7 +8,7 @@ import {
   type AddToQueueResult,
 } from '../services/redisQueueService.js';
 import { deleteScanHistory } from '../services/scanQueueManager.js';
-import { eq, or, sql } from 'drizzle-orm';
+import { eq, or, and, sql } from 'drizzle-orm';
 import { servers } from '../db/schema.js';
 
 export async function serverRoutes(fastify: FastifyInstance) {
