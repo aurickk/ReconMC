@@ -16,10 +16,11 @@ SET
 WHERE hostnames = '[]'::jsonb;
 
 -- 3. Drop old unique constraint (included hostname)
-DROP INDEX IF EXISTS servers_unique;
+-- Note: servers_unique was created as a CONSTRAINT, not an index
+ALTER TABLE servers DROP CONSTRAINT IF EXISTS servers_unique;
 
 -- 4. Create new unique constraint (IP + port only)
-CREATE UNIQUE INDEX servers_unique ON servers(resolved_ip, port);
+ALTER TABLE servers ADD CONSTRAINT servers_unique UNIQUE(resolved_ip, port);
 
 -- 5. Apply same changes to scan_queue for consistency
 DROP INDEX IF EXISTS idx_scan_queue_unique;
