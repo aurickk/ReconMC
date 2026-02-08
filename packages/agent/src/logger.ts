@@ -74,7 +74,7 @@ async function flushLogs() {
 function addLog(level: 'info' | 'warn' | 'error', message: string) {
   // Strip existing level prefixes from message to avoid duplicates like [INFO] [INFO]
   let cleanMessage = String(message).substring(0, 10000); // Limit message size
-  const levelPrefix = new RegExp(`^\\[${level.toUpperCase()}\\s*`, 'i');
+  const levelPrefix = new RegExp(`^\\[${level.toUpperCase()}\\]\\s*`, 'i');
   cleanMessage = cleanMessage.replace(levelPrefix, '').trim();
 
   const entry: LogEntry = {

@@ -740,19 +740,28 @@ export async function connectBot(
 
   // All account types failed - include last error details
   const lastErrorDetails = lastError?.error;
+  const lastErrorCode = lastErrorDetails?.code || 'UNKNOWN';
+
+  // Build detailed error message
+  let errorMessage: string;
+  if (lastErrorDetails?.kicked && lastErrorDetails?.kickReason) {
+    errorMessage = `Kicked: ${lastErrorDetails.kickReason}`;
+  } else if (lastErrorDetails?.kicked) {
+    errorMessage = 'Kicked from server';
+  } else if (lastErrorDetails?.message) {
+    errorMessage = `${lastErrorCode}: ${lastErrorDetails.message}`;
+  } else {
+    errorMessage = `All connection attempts failed (${lastErrorCode})`;
+  }
+
   return {
     success: false,
     host: options.host,
     port: options.port ?? 25565,
     username: getUsername(options.account),
     error: {
-      code: 'ALL_FAILED',
-      // Don't include kickReason in message - it will be shown separately
-      message: lastErrorDetails?.kicked 
-        ? 'Kicked from server'
-        : lastErrorDetails?.message && !lastErrorDetails.kickReason
-          ? lastErrorDetails.message
-          : 'All connection attempts failed',
+      code: lastErrorCode,
+      message: errorMessage,
       kicked: lastErrorDetails?.kicked,
       kickReason: lastErrorDetails?.kickReason,
     },

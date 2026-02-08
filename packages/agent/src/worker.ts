@@ -243,8 +243,23 @@ export async function runWorker(): Promise<void> {
         clearTimeout(scanTimeoutHandle);
       }
       const scanTime = Date.now() - taskStartTime;
-      const message = err instanceof Error ? err.message : String(err);
-      logger.error(`[Task] ${queueId} - FAILED: ${message} (Time: ${scanTime}ms)`);
+
+      // Extract detailed error info
+      let message = err instanceof Error ? err.message : String(err);
+      let details = '';
+
+      // Check for error object with additional details
+      if (err && typeof err === 'object') {
+        const errorObj = err as Record<string, unknown>;
+        if (errorObj.code && typeof errorObj.code === 'string') {
+          details = ` [${errorObj.code}]`;
+        }
+        if (errorObj.kickReason && typeof errorObj.kickReason === 'string') {
+          details += ` - ${errorObj.kickReason}`;
+        }
+      }
+
+      logger.error(`[Task] ${queueId} - FAILED: ${message}${details} (Time: ${scanTime}ms)`);
       // Flush logs before failing the task
       await clearTaskContext();
       await failTask(base, queueId, message);
