@@ -754,6 +754,105 @@ export async function getServer(db: Db, serverId: string): Promise<typeof server
 }
 
 /**
+ * Auto-fail tasks that are stuck in 'processing' state.
+ * This handles cases where:
+ * 1. Agent crashed after claiming but before completing
+ * 2. Agent lost network connectivity and couldn't report completion
+ * 3. Task has been processing for too long (timeout)
+ *
+ * Called periodically by a background job or on queue status checks.
+ */
+export async function cleanupStuckTasks(
+  db: Db,
+  options?: {
+    taskTimeoutMs?: number; // Default: 5 minutes
+    agentTimeoutMs?: number; // Default: 90 seconds (longer than heartbeat 60s)
+  }
+): Promise<{ cleaned: number; errors: string[] }> {
+  const taskTimeoutMs = options?.taskTimeoutMs ?? 5 * 60 * 1000; // 5 minutes
+  const agentTimeoutMs = options?.agentTimeoutMs ?? 90 * 1000; // 90 seconds
+  const now = Date.now();
+  const errors: string[] = [];
+  let cleaned = 0;
+
+  const redis = getRedisClient();
+
+  try {
+    // Find all tasks in 'processing' state
+    const processingItems = await db
+      .select()
+      .from(scanQueue)
+      .where(eq(scanQueue.status, 'processing'));
+
+    for (const item of processingItems) {
+      try {
+        const startedAt = item.startedAt ? new Date(item.startedAt).getTime() : 0;
+        const taskAge = now - startedAt;
+
+        // Get agent's last heartbeat time if assigned
+        let agentLastHeartbeat = 0;
+        if (item.assignedAgentId) {
+          const [agent] = await db
+            .select({ lastHeartbeat: agents.lastHeartbeat })
+            .from(agents)
+            .where(eq(agents.id, item.assignedAgentId))
+            .limit(1);
+
+          if (agent) {
+            agentLastHeartbeat = new Date(agent.lastHeartbeat).getTime();
+          }
+        }
+
+        const agentOffline = agentLastHeartbeat > 0 && (now - agentLastHeartbeat) > agentTimeoutMs;
+        const taskTimedOut = taskAge > taskTimeoutMs;
+
+        // Auto-fail if agent is offline OR task timed out
+        if (agentOffline || taskTimedOut) {
+          const reason = agentOffline
+            ? `Agent offline (no heartbeat for ${Math.floor((now - agentLastHeartbeat) / 1000)}s)`
+            : `Task timeout (${Math.floor(taskAge / 1000)}s)`;
+
+          // Fail the scan (this releases resources and clears agent status)
+          await completeScan(db, item.id, null, `Auto-failed: ${reason}`);
+
+          // Clean up Redis tracking keys
+          if (redis && redis.status === 'ready') {
+            await safeRedisCommand(async (client) => {
+              await client.del(REDIS_KEYS.QUEUE_ITEM(item.id));
+              const dedupeKey = getDedupeKey(item.resolvedIp ?? '', item.port, item.hostname ?? null);
+              await client.hdel(REDIS_KEYS.QUEUE_DUPLICATES, dedupeKey);
+
+              // Remove from Redis processing list
+              const processingList = await client.lrange(REDIS_KEYS.QUEUE_PROCESSING, 0, -1);
+              for (const procItem of processingList) {
+                try {
+                  const parsed = JSON.parse(procItem);
+                  if (parsed.id === item.id) {
+                    await client.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, procItem);
+                    break;
+                  }
+                } catch {
+                  await client.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, procItem);
+                }
+              }
+            });
+          }
+
+          cleaned++;
+        }
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        errors.push(`Failed to cleanup task ${item.id}: ${errorMsg}`);
+      }
+    }
+  } catch (err) {
+    errors.push(`Failed to query processing tasks: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  return { cleaned, errors };
+}
+
+/**
  * Delete a server record
  */
 export async function deleteServer(db: Db, serverId: string): Promise<boolean> {
