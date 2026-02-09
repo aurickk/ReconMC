@@ -92,9 +92,12 @@ function getJsonDepth(value: unknown, currentDepth = 0): number {
     return currentDepth;
   }
   if (Array.isArray(value)) {
+    if (value.length === 0) return currentDepth;
     return Math.max(...value.map(v => getJsonDepth(v, currentDepth + 1)));
   }
-  return Math.max(...Object.values(value as Record<string, unknown>).map(v => getJsonDepth(v, currentDepth + 1)));
+  const objValues = Object.values(value as Record<string, unknown>);
+  if (objValues.length === 0) return currentDepth;
+  return Math.max(...objValues.map(v => getJsonDepth(v, currentDepth + 1)));
 }
 
 /**
@@ -163,8 +166,9 @@ function safeJsonParse(data: string): ServerStatusData | null {
 }
 
 /**
- * Custom DNS lookup function for better compatibility
- * Handles both string address and LookupAddress object return types
+ * Custom DNS lookup wrapper.
+ * With { family: 4 }, dns.lookup always returns (err, address: string, family: number).
+ * This thin wrapper just forwards the callback with the correct signature.
  */
 type LookupCallback = (err: NodeJS.ErrnoException | null, address: string, family: number) => void;
 
@@ -178,29 +182,8 @@ const customLookup = (
   options: dns.LookupOptions,
   callback: LookupCallback
 ): void => {
-  dns.lookup(hostname, options, (err, address, family) => {
-    // Handle both string address and LookupAddress cases
-    if (typeof address === 'string') {
-      callback(err, address, family);
-    } else if (address && typeof address === 'object' && 'address' in address && !Array.isArray(address)) {
-      // LookupAddress object - extract the address string
-      const lookupAddr = address as dns.LookupAddress;
-      callback(err, lookupAddr.address, typeof family === 'number' ? family : 4);
-    } else if (Array.isArray(address) && address.length > 0) {
-      // Multiple addresses - use the first one
-      const first = address[0];
-      if (typeof first === 'string') {
-        callback(err, first, 4);
-      } else if (first && typeof first === 'object' && 'address' in first && !Array.isArray(first)) {
-        const lookupAddr = first as dns.LookupAddress;
-        callback(err, lookupAddr.address, 4);
-      } else {
-        callback(err ?? new Error('Invalid DNS lookup result'), '', 4);
-      }
-    } else {
-      // Fallback
-      callback(err ?? new Error('Invalid DNS lookup result'), '', 4);
-    }
+  dns.lookup(hostname, { ...options, family: 4 }, (err, address, family) => {
+    callback(err, address as string, family as number);
   });
 };
 
@@ -422,11 +405,11 @@ export class MinecraftScanner {
     const options = this.createSocksOptions({ host, port });
     const connectionTimeoutMs = this.options.timeout;
     let socket: net.Socket | null = null;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
-    // Create a timeout promise
+    // Create a timeout promise — store the handle so we can clear it on success
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => {
-        // Clean up socket if it exists
+      timeoutHandle = setTimeout(() => {
         if (socket) {
           socket.destroy();
           socket = null;
@@ -446,11 +429,9 @@ export class MinecraftScanner {
         return socket;
       })
       .catch((err) => {
-        // Ensure we have a proper Error object
         const error = err instanceof Error
           ? err
           : new Error(typeof err === 'object' && err !== null && 'message' in err ? String(err.message) : String(err) || 'SOCKS connection failed');
-        // Clean up socket if it exists
         if (socket) {
           socket.destroy();
           socket = null;
@@ -462,17 +443,20 @@ export class MinecraftScanner {
     try {
       socket = await Promise.race([connectionPromise, timeoutPromise]);
     } catch (err) {
+      // Clear timeout on failure too (timeout may not have fired if connection failed first)
+      if (timeoutHandle) clearTimeout(timeoutHandle);
       const error = err instanceof Error ? err : new Error(String(err));
       this.logError(`SOCKS connection failed:`, error.message);
       throw error;
     }
 
-    // At this point, socket must be non-null (otherwise we would have thrown above)
+    // Clear the connection timeout — connection succeeded, don't let it destroy the socket later
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+
     if (!socket) {
       throw new Error('SOCKS connection failed: No socket available');
     }
 
-    // Non-null assertion: we've verified socket is not null above
     const establishedSocket: net.Socket = socket;
 
     return new Promise((resolve, reject) => {

@@ -79,14 +79,16 @@ export async function releaseResourcesTx(
   await tx
     .update(proxies)
     .set({
-      currentUsage: sql`${proxies.currentUsage} - 1`,
+      // Use GREATEST to prevent negative values if called twice
+      currentUsage: sql`GREATEST(${proxies.currentUsage} - 1, 0)`,
     })
     .where(eq(proxies.id, proxyId));
 
   await tx
     .update(accounts)
     .set({
-      currentUsage: sql`${accounts.currentUsage} - 1`,
+      // Use GREATEST to prevent negative values if called twice
+      currentUsage: sql`GREATEST(${accounts.currentUsage} - 1, 0)`,
     })
     .where(eq(accounts.id, accountId));
 }

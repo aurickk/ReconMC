@@ -325,7 +325,7 @@ const COMMAND_SIGNATURES = new Map<string, string>([
 
   // ASkyBlock
   ['askyblock', 'askyblock'],
-  ['island', 'askyblock'],
+  // Note: 'island' is reserved for superiorskyblock to avoid duplicate key conflict
 
   // UltimateChat
   ['ultimatechat', 'ultimatechat'],
@@ -351,7 +351,7 @@ const COMMAND_SIGNATURES = new Map<string, string>([
   // CrazyCrates
   ['crazycrates', 'crazycrates'],
   ['crate', 'crazycrates'],
-  ['cc', 'crazycrates'],
+  // Note: 'cc' is reserved for chatcontrol to avoid duplicate key conflict
 
   // UltimateTimber
   ['ultimatetimber', 'ultimatetimber'],

@@ -5,9 +5,9 @@ import {
   listServers,
   getServer,
   deleteServer,
+  deleteScanHistory,
   type AddToQueueResult,
 } from '../services/redisQueueService.js';
-import { deleteScanHistory } from '../services/scanQueueManager.js';
 import { eq, or, and, sql } from 'drizzle-orm';
 import { servers, scanQueue, taskLogs } from '../db/schema.js';
 import { getRedisClient, safeRedisCommand, REDIS_KEYS } from '../db/redis.js';

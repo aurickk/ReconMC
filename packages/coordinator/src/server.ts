@@ -11,8 +11,8 @@ import { proxyRoutes } from './routes/proxies.js';
 import { agentRoutes } from './routes/agents.js';
 import { logger } from './logger.js';
 import { requireApiKey, isAuthDisabled } from './middleware/auth.js';
-import { isRedisAvailable } from './db/redis.js';
-import { createDb } from './db/index.js';
+import { isRedisAvailable, closeRedis } from './db/redis.js';
+import { createDb, closeDb } from './db/index.js';
 import { startStuckTaskRecovery } from './services/redisQueueService.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -137,5 +137,31 @@ export async function startCoordinatorServer(
 
   // Start periodic recovery of tasks stuck in "processing" state
   const db = createDb();
-  startStuckTaskRecovery(db);
+  const recoveryInterval = startStuckTaskRecovery(db);
+
+  // Graceful shutdown: close connections and drain in-flight requests
+  const shutdown = async (signal: string) => {
+    logger.info(`Received ${signal}, shutting down gracefully...`);
+
+    // Stop accepting new connections and wait for in-flight requests to finish
+    try {
+      await server.close();
+      logger.info('Fastify server closed');
+    } catch (err) {
+      logger.error('Error closing Fastify server:', err);
+    }
+
+    // Stop the stuck-task recovery interval
+    clearInterval(recoveryInterval);
+
+    // Close Redis and database connections
+    await closeRedis();
+    await closeDb();
+
+    logger.info('Graceful shutdown complete');
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }

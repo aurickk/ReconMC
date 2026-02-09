@@ -2,16 +2,8 @@
  * Proxy configuration types
  */
 
-/**
- * Proxy configuration for SOCKS connections
- */
-export interface ProxyConfig {
-  host: string;
-  port: number;
-  type: 'socks5' | 'socks4';
-  username?: string;
-  password?: string;
-}
+// Re-export ProxyConfig from @reconmc/scanner
+export type { ProxyConfig } from '@reconmc/scanner';
 
 /**
  * Validate proxy configuration

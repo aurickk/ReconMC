@@ -9,6 +9,7 @@ import {
   safeRedisCommand,
   REDIS_KEYS,
 } from '../db/redis.js';
+import { logger } from '../logger.js';
 
 export interface AddToQueueInput {
   servers: string[];
@@ -142,60 +143,62 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
     toAdd.push(r);
   }
 
-  // Add to PostgreSQL
+  // Add to PostgreSQL using bulk insert
+  const valuesToAdd = toAdd.map(r => ({
+    serverAddress: r.address,
+    hostname: r.hostname,
+    resolvedIp: r.resolvedIp,
+    port: r.port,
+    status: 'pending' as const,
+  }));
+
+  const inserted = await db
+    .insert(scanQueue)
+    .values(valuesToAdd)
+    .returning();
+
   const added: Array<{ id: string; serverAddress: string; resolvedIp: string; port: number }> = [];
 
-  for (const r of toAdd) {
-    if (!r) continue;
+  // Add each inserted item to Redis
+  for (const item of inserted) {
+    added.push({
+      id: item.id,
+      serverAddress: item.serverAddress,
+      resolvedIp: item.resolvedIp ?? '',
+      port: item.port,
+    });
 
-    const [inserted] = await db
-      .insert(scanQueue)
-      .values({
-        serverAddress: r.address,
-        hostname: r.hostname,
-        resolvedIp: r.resolvedIp,
-        port: r.port,
-        status: 'pending',
-      } as NewScanQueue)
-      .returning();
+    // Find the original hostname for this item
+    const originalItem = toAdd.find(r => r.address === item.serverAddress && r.port === item.port);
 
-    if (inserted) {
-      added.push({
-        id: inserted.id,
-        serverAddress: inserted.serverAddress,
-        resolvedIp: inserted.resolvedIp ?? '',
-        port: inserted.port,
+    // Add to Redis pending queue as a List (not Hash)
+    await safeRedisCommand(async (client) => {
+      const key = getDedupeKey(item.resolvedIp ?? '', item.port, item.hostname);
+      const itemData = JSON.stringify({
+        id: item.id,
+        serverAddress: item.serverAddress,
+        resolvedIp: item.resolvedIp,
+        port: item.port,
+        hostname: originalItem?.hostname ?? item.hostname,
       });
-
-      // Add to Redis pending queue as a List (not Hash)
-      await safeRedisCommand(async (client) => {
-        const key = getDedupeKey(r.resolvedIp, r.port, r.hostname);
-        const itemData = JSON.stringify({
-          id: inserted.id,
-          serverAddress: inserted.serverAddress,
-          resolvedIp: inserted.resolvedIp,
-          port: inserted.port,
-          hostname: r.hostname,
-        });
-        // Try to push to the list - if WRONGTYPE error, clear old Hash data first
-        try {
-          // Push to the end of the list (RPUSH)
+      // Try to push to the list - if WRONGTYPE error, clear old Hash data first
+      try {
+        // Push to the end of the list (RPUSH)
+        await client.rpush(REDIS_KEYS.QUEUE_PENDING, itemData);
+      } catch (err: unknown) {
+        if (err instanceof Error && err.message.includes('WRONGTYPE')) {
+          // Old Hash data exists, clear it
+          await client.del(REDIS_KEYS.QUEUE_PENDING);
+          await client.del(REDIS_KEYS.QUEUE_PROCESSING);
+          // Retry the rpush
           await client.rpush(REDIS_KEYS.QUEUE_PENDING, itemData);
-        } catch (err: unknown) {
-          if (err instanceof Error && err.message.includes('WRONGTYPE')) {
-            // Old Hash data exists, clear it
-            await client.del(REDIS_KEYS.QUEUE_PENDING);
-            await client.del(REDIS_KEYS.QUEUE_PROCESSING);
-            // Retry the rpush
-            await client.rpush(REDIS_KEYS.QUEUE_PENDING, itemData);
-          } else {
-            throw err;
-          }
+        } else {
+          throw err;
         }
-        // Track in duplicates set
-        await client.hset(REDIS_KEYS.QUEUE_DUPLICATES, key, inserted.id);
-      });
-    }
+      }
+      // Track in duplicates set
+      await client.hset(REDIS_KEYS.QUEUE_DUPLICATES, key, item.id);
+    });
   }
 
   return { added: added.length, skipped, queued: added };
@@ -258,7 +261,8 @@ async function syncPostgresToRedis(
 
     if (pendingItems.length === 0) return;
 
-    // Add each item to Redis
+    // Batch all Redis operations into a single pipeline (one round trip)
+    const pipeline = redis.pipeline();
     for (const item of pendingItems) {
       const key = getDedupeKey(item.resolvedIp ?? '', item.port, item.hostname);
       const itemData = JSON.stringify({
@@ -268,12 +272,13 @@ async function syncPostgresToRedis(
         port: item.port,
         hostname: item.hostname,
       });
-      await redis.rpush(REDIS_KEYS.QUEUE_PENDING, itemData);
-      await redis.hset(REDIS_KEYS.QUEUE_DUPLICATES, key, item.id);
+      pipeline.rpush(REDIS_KEYS.QUEUE_PENDING, itemData);
+      pipeline.hset(REDIS_KEYS.QUEUE_DUPLICATES, key, item.id);
     }
+    await pipeline.exec();
   } catch (err) {
     // Log but don't fail - sync is best-effort
-    console.error('Error syncing PostgreSQL to Redis:', err);
+    logger.error('[RedisQueueService] Error syncing PostgreSQL to Redis:', err);
   }
 }
 
@@ -288,7 +293,8 @@ async function claimFromQueueRedis(
   if (!redis) return null;
 
   // Atomically pop from end of pending and push to processing
-  const result = await redis.rpoplpush(REDIS_KEYS.QUEUE_PENDING, REDIS_KEYS.QUEUE_PROCESSING);
+  // Use lmove instead of deprecated rpoplpush (Redis 6.2+)
+  const result = await redis.lmove(REDIS_KEYS.QUEUE_PENDING, REDIS_KEYS.QUEUE_PROCESSING, 'RIGHT', 'LEFT');
   if (!result) return null;
 
   let itemData: { id: string; serverAddress: string; resolvedIp: string; port: number; hostname: string | null };
@@ -308,8 +314,17 @@ async function claimFromQueueRedis(
     return await db.transaction(async (tx) => {
       const resources = await allocateResourcesTx(tx);
       if (!resources) {
-        // No resources available, put back in pending queue
-        await redis.rpoplpush(REDIS_KEYS.QUEUE_PROCESSING, REDIS_KEYS.QUEUE_PENDING);
+        // No resources available — remove the specific item from processing and push back to pending.
+        // Using lrem + lpush instead of blind lmove to avoid moving a different agent's item.
+        const itemJson = JSON.stringify({
+          id: itemData.id,
+          serverAddress: itemData.serverAddress,
+          resolvedIp: itemData.resolvedIp,
+          port: itemData.port,
+          hostname: itemData.hostname,
+        });
+        await redis.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, itemJson);
+        await redis.lpush(REDIS_KEYS.QUEUE_PENDING, itemJson);
         await redis.del(REDIS_KEYS.QUEUE_ITEM(itemData.id));
         return null;
       }
@@ -355,8 +370,17 @@ async function claimFromQueueRedis(
       };
     });
   } catch (err) {
-    // If anything fails, move back to pending and clean up
-    await redis.rpoplpush(REDIS_KEYS.QUEUE_PROCESSING, REDIS_KEYS.QUEUE_PENDING);
+    // If anything fails, remove the specific item from processing and push back to pending.
+    // Using lrem + lpush instead of blind lmove, which could pop a different agent's item.
+    const itemJson = JSON.stringify({
+      id: itemData.id,
+      serverAddress: itemData.serverAddress,
+      resolvedIp: itemData.resolvedIp,
+      port: itemData.port,
+      hostname: itemData.hostname,
+    });
+    await redis.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, itemJson);
+    await redis.lpush(REDIS_KEYS.QUEUE_PENDING, itemJson);
     await redis.del(REDIS_KEYS.QUEUE_ITEM(itemData.id));
     throw err;
   }
@@ -449,7 +473,7 @@ export async function getQueueStatus(db: Db): Promise<QueueStatus> {
         // Fall through to PostgreSQL query
       } else {
         // For other errors, fall back to PostgreSQL
-        console.error('Redis queue status error:', err);
+        logger.error('[RedisQueueService] Redis queue status error:', err);
       }
       // Use PostgreSQL fallback
       const [pendingResult, processingResult] = await Promise.all([
@@ -535,7 +559,7 @@ async function cleanupOrphanedProcessingItems(
     }
   } catch (err) {
     // Log but don't fail - cleanup is best-effort
-    console.error('Error during Redis processing list cleanup:', err);
+    logger.error('[RedisQueueService] Error during Redis processing list cleanup:', err);
   }
 }
 
@@ -568,11 +592,7 @@ export async function completeScan(
 ): Promise<void> {
   const redis = getRedisClient();
 
-  // Fetch item data first for Redis cleanup (outside transaction)
-  const [itemData] = await db.select().from(scanQueue).where(eq(scanQueue.id, queueId)).limit(1);
-  if (!itemData) return;
-
-  // Use transaction with row-level locking to prevent race conditions (duplicates)
+  // Single transactional fetch with row-level locking (no double query)
   await db.transaction(async (tx) => {
     const [item] = await tx
       .select()
@@ -696,33 +716,29 @@ export async function completeScan(
 
     // Remove from PostgreSQL queue
     await tx.delete(scanQueue).where(eq(scanQueue.id, queueId));
-  });
 
-  // Remove from Redis processing list and duplicates set (outside transaction)
-  if (redis && redis.status === 'ready') {
-    const dedupeKey = getDedupeKey(itemData.resolvedIp ?? '', itemData.port, itemData.hostname);
-    await safeRedisCommand(async (client) => {
-      // Remove the queue item tracking key
-      await client.del(REDIS_KEYS.QUEUE_ITEM(queueId));
-      // Remove from duplicates tracking
-      await client.hdel(REDIS_KEYS.QUEUE_DUPLICATES, dedupeKey);
-      // Remove from processing list by searching for the queue ID in stored items
-      // This is O(n) but processing list should be small
-      const processingList = await client.lrange(REDIS_KEYS.QUEUE_PROCESSING, 0, -1);
-      for (const procItem of processingList) {
-        try {
-          const parsed = JSON.parse(procItem);
-          if (parsed.id === queueId) {
-            await client.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, procItem);
-            break;
-          }
-        } catch {
-          // Skip invalid JSON entries
-          await client.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, procItem);
-        }
-      }
-    });
-  }
+    // Remove from Redis processing list and duplicates set (inside transaction closure for data access)
+    if (redis && redis.status === 'ready') {
+      const dedupeKey = getDedupeKey(item.resolvedIp ?? '', item.port, item.hostname);
+      // Build the exact JSON that was stored when the item was claimed (for lrem matching)
+      const storedJson = JSON.stringify({
+        id: item.id,
+        serverAddress: item.serverAddress,
+        resolvedIp: item.resolvedIp,
+        port: item.port,
+        hostname: item.hostname,
+      });
+      await safeRedisCommand(async (client) => {
+        // Pipeline all cleanup operations in a single round trip
+        const pipeline = client.pipeline();
+        pipeline.del(REDIS_KEYS.QUEUE_ITEM(queueId));
+        pipeline.hdel(REDIS_KEYS.QUEUE_DUPLICATES, dedupeKey);
+        // O(1) targeted removal using the exact stored JSON instead of O(n) lrange scan
+        pipeline.lrem(REDIS_KEYS.QUEUE_PROCESSING, 1, storedJson);
+        await pipeline.exec();
+      });
+    }
+  });
 }
 
 /**
@@ -789,7 +805,7 @@ export async function recoverStuckTasks(db: Db): Promise<number> {
 
     if (stuckTasks.length === 0) return 0;
 
-    console.log(`[StuckTaskRecovery] Found ${stuckTasks.length} stuck task(s), recovering...`);
+    logger.info(`[StuckTaskRecovery] Found ${stuckTasks.length} stuck task(s), recovering...`);
 
     for (const task of stuckTasks) {
       try {
@@ -798,15 +814,15 @@ export async function recoverStuckTasks(db: Db): Promise<number> {
           task.id,
           `Task automatically recovered: stuck in processing for over ${Math.round(STUCK_TASK_TIMEOUT_MS / 60000)} minutes (agent may have crashed or lost connection)`
         );
-        console.log(`[StuckTaskRecovery] Recovered task ${task.id} (${task.serverAddress})`);
+        logger.info(`[StuckTaskRecovery] Recovered task ${task.id} (${task.serverAddress})`);
       } catch (err) {
-        console.error(`[StuckTaskRecovery] Failed to recover task ${task.id}:`, err);
+        logger.error(`[StuckTaskRecovery] Failed to recover task ${task.id}:`, err);
       }
     }
 
     return stuckTasks.length;
   } catch (err) {
-    console.error('[StuckTaskRecovery] Error during stuck task recovery:', err);
+    logger.error('[StuckTaskRecovery] Error during stuck task recovery:', err);
     return 0;
   }
 }
@@ -816,10 +832,56 @@ export async function recoverStuckTasks(db: Db): Promise<number> {
  * Returns the interval handle for cleanup.
  */
 export function startStuckTaskRecovery(db: Db, intervalMs: number = 60_000): ReturnType<typeof setInterval> {
-  console.log(`[StuckTaskRecovery] Started (checking every ${intervalMs / 1000}s, timeout: ${STUCK_TASK_TIMEOUT_MS / 1000}s)`);
+  logger.info(`[StuckTaskRecovery] Started (checking every ${intervalMs / 1000}s, timeout: ${STUCK_TASK_TIMEOUT_MS / 1000}s)`);
   return setInterval(() => {
     recoverStuckTasks(db).catch((err) => {
-      console.error('[StuckTaskRecovery] Unhandled error:', err);
+      logger.error('[StuckTaskRecovery] Unhandled error:', err);
     });
   }, intervalMs);
+}
+
+/**
+ * Delete a specific scan entry from server's scan history
+ * @param db Database instance
+ * @param serverId Server ID
+ * @param timestamp Timestamp of the scan to delete (ISO string)
+ * @returns true if deleted, false if not found
+ */
+export async function deleteScanHistory(db: Db, serverId: string, timestamp: string): Promise<boolean> {
+  const [server] = await db.select().from(servers).where(eq(servers.id, serverId)).limit(1);
+  if (!server) return false;
+
+  const history = (server.scanHistory as unknown as Array<{ timestamp: string; result?: unknown; errorMessage?: string }>) ?? [];
+  const filteredHistory = history.filter(h => h.timestamp !== timestamp);
+
+  if (filteredHistory.length === history.length) return false; // No matching entry found
+
+  // Update scan count
+  const newScanCount = Math.max(0, (server.scanCount ?? 1) - 1);
+
+  // If we deleted the most recent scan, update latestResult and lastScannedAt
+  const sortedHistory = [...filteredHistory].sort((a, b) =>
+    new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+  );
+  const newLatestResult = sortedHistory[0]?.result ?? null;
+  const newLastScannedAt = sortedHistory[0]?.timestamp
+    ? new Date(sortedHistory[0].timestamp)
+    : server.firstSeenAt ?? null;
+
+  await db
+    .update(servers)
+    .set({
+      scanHistory: filteredHistory as any,
+      scanCount: newScanCount,
+      latestResult: newLatestResult,
+      lastScannedAt: newLastScannedAt,
+    })
+    .where(eq(servers.id, serverId));
+
+  // If no scans left, optionally delete the server record entirely
+  if (filteredHistory.length === 0) {
+    await db.delete(servers).where(eq(servers.id, serverId));
+  }
+
+  return true;
 }

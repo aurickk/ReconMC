@@ -9,7 +9,6 @@ import {
   jsonb,
   unique,
 } from 'drizzle-orm/pg-core';
-import { relations } from 'drizzle-orm';
 
 export const proxies = pgTable('proxies', {
   id: uuid('id').primaryKey().defaultRandom(),

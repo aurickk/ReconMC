@@ -5,16 +5,8 @@
 import { scanServer, detectServerMode } from '@reconmc/scanner';
 import { connectBot } from '@reconmc/bot';
 import type { Account } from '@reconmc/bot';
-import type { ScanResult, IpLocation } from '@reconmc/scanner';
+import type { ScanResult, IpLocation, ProxyConfig } from '@reconmc/scanner';
 import { logger } from './logger.js';
-
-export interface ProxyConfig {
-  host: string;
-  port: number;
-  type: 'socks4' | 'socks5';
-  username?: string;
-  password?: string;
-}
 
 export interface FullScanResult {
   ping: ScanResult;
@@ -92,7 +84,7 @@ async function lookupIpLocation(ip: string): Promise<IpLocation | null> {
     }
     const data = await response.json() as {
       country?: string;
-      countryName?: string;
+      countryCode?: string;
       city?: string;
       isp?: string;
       lat?: number;
@@ -102,9 +94,12 @@ async function lookupIpLocation(ip: string): Promise<IpLocation | null> {
     if (data.status === 'fail') {
       return null;
     }
+    // ip-api.com returns:
+    //   "country"     = full name (e.g., "United States")
+    //   "countryCode" = 2-letter ISO code (e.g., "US")
     return {
-      country: data.country,
-      countryName: data.countryName,
+      country: data.countryCode,  // 2-letter country code (e.g., "US")
+      countryName: data.country,  // Full country name (e.g., "United States")
       city: data.city,
       isp: data.isp,
       lat: data.lat,
@@ -167,21 +162,9 @@ export async function runFullScan(input: FullScanInput): Promise<FullScanResult>
     }
   }
 
-  // Determine server mode
-  let serverMode: 'unknown' | 'cracked' | 'online' = pingResult.serverMode ?? 'unknown';
-  if (serverMode === 'unknown' && pingResult.status?.data?.players?.sample) {
-    const sample = pingResult.status.data.players.sample;
-    const hasInvalidUUIDs = sample.some(
-      (p: { id?: string }) =>
-        p.id && (p.id.startsWith('00000000') || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p.id))
-    );
-    const hasValidUUIDs = sample.some(
-      (p: { id?: string }) => p.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p.id)
-    );
-    if (hasValidUUIDs && !hasInvalidUUIDs) serverMode = 'online';
-    else if (hasInvalidUUIDs) serverMode = 'cracked';
-  }
-
+  // Server mode is already detected by scanServer when enableServerModeDetection: true
+  // No need to re-detect here - use the value from pingResult.serverMode
+  const serverMode: 'unknown' | 'cracked' | 'online' = pingResult.serverMode ?? 'unknown';
   result.serverMode = serverMode;
   logger.info(`[Mode] Server mode: ${serverMode}`);
 

@@ -1,10 +1,6 @@
-/**
- * Cracked account - just a username
- */
-export interface CrackedAccount {
-  type: 'cracked';
-  username: string;
-}
+import type { ProxyConfig } from '@reconmc/scanner';
+// Re-export account types from auth module (single source of truth)
+export type { CrackedAccount, MicrosoftTokenAccount, Account } from './auth/types.js';
 
 /**
  * NBT compound node types for parsing chat messages
@@ -55,30 +51,8 @@ export interface MineflayerBotOptions {
   [key: string]: unknown;
 }
 
-/**
- * Microsoft account with access and refresh tokens
- */
-export interface MicrosoftTokenAccount {
-  type: 'microsoft';
-  accessToken: string;
-  refreshToken?: string;
-}
-
-/**
- * Union type for all account types
- */
-export type Account = CrackedAccount | MicrosoftTokenAccount;
-
-/**
- * Proxy configuration
- */
-export interface ProxyConfig {
-  host: string;
-  port: number;
-  type: 'socks5' | 'socks4';
-  username?: string;
-  password?: string;
-}
+// Re-export ProxyConfig from @reconmc/scanner
+export type { ProxyConfig } from '@reconmc/scanner';
 
 /**
  * Bot connection options

@@ -85,11 +85,6 @@ function addLog(level: 'info' | 'warn' | 'error', message: string) {
 
   logBuffer.push(entry);
 
-  // Also log to original console (not the intercepted one)
-  const timestamp = new Date(entry.timestamp).toISOString();
-  const originalMethod = level === 'error' ? originalConsole.error : level === 'warn' ? originalConsole.warn : originalConsole.log;
-  originalMethod(`[${timestamp}] [${level.toUpperCase()}]`, cleanMessage);
-
   // Auto-flush if buffer is full
   if (logBuffer.length >= MAX_BUFFER_SIZE) {
     flushLogs();

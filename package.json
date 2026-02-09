@@ -22,15 +22,12 @@
     "clean": "tsc --build --clean"
   },
   "devDependencies": {
-    "@types/dockerode": "^4.0.1",
     "typescript": "^5.9.3"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "dockerode": "^4.0.9",
-    "isomorphic-dompurify": "^2.35.0",
     "zod": "^4.3.6"
   }
 }

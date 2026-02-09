@@ -57,21 +57,29 @@ export async function testProxyConnection(
 ): Promise<{ success: boolean; error?: string; latency?: number }> {
   const startTime = Date.now();
 
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
   try {
     const options = createSocksOptions(proxy, { host: targetHost, port: targetPort });
 
-    await Promise.race([
+    const result = await Promise.race([
       SocksClient.createConnection(options),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Proxy connection timeout')), timeout)
-      ),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error('Proxy connection timeout')), timeout);
+      }),
     ]);
+
+    // Clear the timeout and close the socket — we only needed to verify connectivity
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (result?.socket) {
+      result.socket.destroy();
+    }
 
     return {
       success: true,
       latency: Date.now() - startTime,
     };
   } catch (err) {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
     return {
       success: false,
       error: err instanceof Error ? err.message : 'Unknown proxy error',
