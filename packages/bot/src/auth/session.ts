@@ -523,47 +523,34 @@ export async function authenticateWithToken(
       };
     }
 
-    // Session token is invalid (401/403) or rate limited (429) - try refresh if available
-    if ((validation.statusCode === 401 || validation.statusCode === 403 || validation.statusCode === 429) && account.refreshToken) {
-      if (validation.statusCode === 429) {
-        logger.debug('[authenticateWithToken] Rate limited on validation, proceeding with refresh flow...');
-      } else {
-        logger.debug('[authenticateWithToken] Session token expired, attempting refresh...');
-      }
-      const result = await fullRefreshFlow(account.refreshToken, fetchFn);
-
-      // Report refreshed tokens back to coordinator if callback is set
-      if (result.success && result.refreshed && globalTokenRefreshCallback && globalAccountId) {
-        if (result.accessToken && result.refreshToken) {
-          try {
-            await globalTokenRefreshCallback(globalAccountId, {
-              accessToken: result.accessToken,
-              refreshToken: result.refreshToken,
-            });
-            logger.debug('[authenticateWithToken] Reported refreshed tokens to coordinator');
-          } catch (err) {
-            logger.warn('[authenticateWithToken] Failed to report refreshed tokens:', err);
-          }
-        }
-      }
-
-      return result;
-    }
-
-    // No refresh token available - provide helpful error message
+    // Session token is invalid/expired/rejected - try refresh if we have a refresh token
     if (!account.refreshToken) {
-      logger.error('[authenticateWithToken] Token expired but no refresh token available');
+      logger.error(`[authenticateWithToken] Token validation failed (HTTP ${validation.statusCode}: ${validation.error}) and no refresh token available`);
       return {
         success: false,
-        error: 'Access token expired and no refresh token available. Please re-authenticate the account.',
+        error: `Access token invalid (${validation.error ?? 'unknown'}) and no refresh token available. Please re-authenticate the account.`,
       };
     }
 
-    // Other error
-    return {
-      success: false,
-      error: validation.error ?? 'Token validation failed',
-    };
+    logger.debug(`[authenticateWithToken] Token validation failed (HTTP ${validation.statusCode}), attempting refresh...`);
+    const result = await fullRefreshFlow(account.refreshToken, fetchFn);
+
+    // Report refreshed tokens back to coordinator if callback is set
+    if (result.success && result.refreshed && globalTokenRefreshCallback && globalAccountId) {
+      if (result.accessToken && result.refreshToken) {
+        try {
+          await globalTokenRefreshCallback(globalAccountId, {
+            accessToken: result.accessToken,
+            refreshToken: result.refreshToken,
+          });
+          logger.debug('[authenticateWithToken] Reported refreshed tokens to coordinator');
+        } catch (err) {
+          logger.warn('[authenticateWithToken] Failed to report refreshed tokens:', err);
+        }
+      }
+    }
+
+    return result;
   } catch (err) {
     return {
       success: false,

@@ -439,43 +439,36 @@ export async function validateMicrosoftAccount(
     };
   }
 
-  // Access token is invalid/expired - try refresh if available
-  if ((validation.statusCode === 401 || validation.statusCode === 403) && refreshToken) {
-    if (!refreshToken || refreshToken.length === 0) {
-      return {
-        valid: false,
-        error: 'Access token expired but no refresh token available. Please re-authenticate the account.',
-      };
-    }
-
-    const refreshResult = await fullRefreshFlow(refreshToken, fetchFn);
-
-    if (refreshResult.success) {
-      return {
-        valid: true,
-        username: refreshResult.profile.name,
-        profileId: refreshResult.profile.id,
-        newAccessToken: refreshResult.accessToken,
-        newRefreshToken: refreshResult.refreshToken,
-        refreshed: true,
-      };
-    }
-
-    // Provide clearer error message based on common failures
-    let errorMsg = refreshResult.error;
-    if (errorMsg.includes('expired')) {
-      errorMsg = 'Refresh token is expired (refresh tokens expire after ~90 days of non-use). You must re-authenticate the account from scratch to get a new refresh token.';
-    }
-
+  // Token validation failed - try refresh if we have a refresh token
+  if (!refreshToken || refreshToken.length === 0) {
     return {
       valid: false,
-      error: errorMsg,
+      error: `Access token invalid (${validation.error ?? 'unknown'}) and no refresh token available. Please re-authenticate the account.`,
     };
+  }
+
+  const refreshResult = await fullRefreshFlow(refreshToken, fetchFn);
+
+  if (refreshResult.success) {
+    return {
+      valid: true,
+      username: refreshResult.profile.name,
+      profileId: refreshResult.profile.id,
+      newAccessToken: refreshResult.accessToken,
+      newRefreshToken: refreshResult.refreshToken,
+      refreshed: true,
+    };
+  }
+
+  // Provide clearer error message based on common failures
+  let errorMsg = refreshResult.error;
+  if (errorMsg.includes('expired')) {
+    errorMsg = 'Refresh token is expired (refresh tokens expire after ~90 days of non-use). You must re-authenticate the account from scratch to get a new refresh token.';
   }
 
   return {
     valid: false,
-    error: validation.error ?? 'Token validation failed',
+    error: errorMsg,
   };
 }
 
