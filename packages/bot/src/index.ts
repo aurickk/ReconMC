@@ -28,6 +28,10 @@ export {
   clearTokenRefreshCallback,
 } from './auth/index.js';
 
+// Proxied fetch for SOCKS-proxied auth API calls
+export type { SocksProxyConfig } from './auth/proxied-fetch.js';
+export { proxiedFetch, createFetchFn } from './auth/proxied-fetch.js';
+
 // Mineflayer plugins
 export { pluginDetector } from './plugins/index.js';
 export type { PluginDetectionResult, PluginDetectorOptions } from './plugins/index.js';

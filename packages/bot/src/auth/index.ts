@@ -5,8 +5,10 @@
 export * from './types';
 export * from './microsoft';
 export * from './session';
+export * from './proxied-fetch';
 
 import type { Account, CrackedAccount, MicrosoftTokenAccount, AuthResult, TokenRefreshCallback } from './types';
+import type { SocksProxyConfig } from './proxied-fetch';
 import { validateTokenAccount, authenticateWithToken, getMinecraftProfile, setTokenRefreshCallback, clearTokenRefreshCallback } from './session';
 
 /**
@@ -79,10 +81,11 @@ export async function getAccessToken(
 
 /**
  * Get Microsoft profile for an account (fetches from API)
+ * Optionally routes API calls through a SOCKS proxy to avoid rate limiting.
  */
-export async function getAccountProfile(account: Account): Promise<{ id: string; name: string } | null> {
+export async function getAccountProfile(account: Account, proxy?: SocksProxyConfig): Promise<{ id: string; name: string } | null> {
   if (account.type === 'microsoft') {
-    const result = await authenticateWithToken(account);
+    const result = await authenticateWithToken(account, proxy);
     return result.success && result.profile ? result.profile : null;
   }
   return null;
@@ -90,11 +93,12 @@ export async function getAccountProfile(account: Account): Promise<{ id: string;
 
 /**
  * Get full auth result including userHash for session authentication
- * This is needed for proper Minecraft session token auth
+ * This is needed for proper Minecraft session token auth.
+ * Optionally routes API calls through a SOCKS proxy to avoid rate limiting.
  */
-export async function getAccountAuth(account: Account): Promise<AuthResult | null> {
+export async function getAccountAuth(account: Account, proxy?: SocksProxyConfig): Promise<AuthResult | null> {
   if (account.type === 'microsoft') {
-    return await authenticateWithToken(account);
+    return await authenticateWithToken(account, proxy);
   }
   return null;
 }

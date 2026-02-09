@@ -6,7 +6,6 @@ import {
   failScan,
   getQueueStatus,
   getQueueEntries,
-  cleanupStuckTasks,
 } from '../services/redisQueueService.js';
 
 export async function queueRoutes(fastify: FastifyInstance) {
@@ -15,15 +14,9 @@ export async function queueRoutes(fastify: FastifyInstance) {
   /**
    * GET /api/queue
    * Get queue status (pending/processing counts)
-   * Also triggers cleanup of stuck tasks (run opportunistically on status checks)
    */
   fastify.get('/queue', async (_request, reply) => {
     try {
-      // Run stuck task cleanup in the background (don't await)
-      cleanupStuckTasks(db).catch((err) => {
-        fastify.log.warn('Failed to cleanup stuck tasks:', err);
-      });
-
       const status = await getQueueStatus(db);
       return reply.send(status);
     } catch (err) {
@@ -35,7 +28,6 @@ export async function queueRoutes(fastify: FastifyInstance) {
   /**
    * GET /api/queue/entries
    * Get queue entries with optional status filter (pending/processing/completed/failed/all)
-   * Also triggers cleanup of stuck tasks
    */
   fastify.get<{ Querystring: { status?: string; limit?: string; offset?: string } }>(
     '/queue/entries',
@@ -48,13 +40,6 @@ export async function queueRoutes(fastify: FastifyInstance) {
       }
 
       try {
-        // Run stuck task cleanup in the background when viewing processing tasks
-        if (status === 'processing' || status === 'all') {
-          cleanupStuckTasks(db).catch((err) => {
-            fastify.log.warn('Failed to cleanup stuck tasks:', err);
-          });
-        }
-
         const entries = await getQueueEntries(db, {
           status: status as 'pending' | 'processing' | 'completed' | 'failed' | 'all',
           limit: parseInt(limit, 10),
@@ -130,30 +115,6 @@ export async function queueRoutes(fastify: FastifyInstance) {
       } catch (err) {
         fastify.log.error(err);
         return reply.code(500).send({ error: 'Failed to fail scan', message: String(err) });
-      }
-    }
-  );
-
-  /**
-   * POST /api/queue/cleanup
-   * Manually trigger cleanup of stuck tasks
-   * Auto-fails tasks where agent is offline or task has timed out
-   */
-  fastify.post<{ Body: { taskTimeoutMs?: number; agentTimeoutMs?: number } }>(
-    '/queue/cleanup',
-    async (request, reply) => {
-      const { taskTimeoutMs, agentTimeoutMs } = request.body ?? {};
-
-      try {
-        const result = await cleanupStuckTasks(db, { taskTimeoutMs, agentTimeoutMs });
-        return reply.send({
-          cleaned: result.cleaned,
-          errors: result.errors,
-          message: `Cleaned up ${result.cleaned} stuck task(s)`,
-        });
-      } catch (err) {
-        fastify.log.error(err);
-        return reply.code(500).send({ error: 'Failed to cleanup stuck tasks', message: String(err) });
       }
     }
   );

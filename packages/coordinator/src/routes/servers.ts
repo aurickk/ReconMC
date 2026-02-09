@@ -12,6 +12,8 @@ import { eq, or, and, sql } from 'drizzle-orm';
 import { servers, scanQueue, taskLogs } from '../db/schema.js';
 import { getRedisClient, safeRedisCommand, REDIS_KEYS } from '../db/redis.js';
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function serverRoutes(fastify: FastifyInstance) {
   const db = createDb();
 
@@ -125,6 +127,9 @@ export async function serverRoutes(fastify: FastifyInstance) {
   fastify.get<{ Params: { id: string } }>(
     '/servers/:id',
     async (request, reply) => {
+      if (!request.params.id || !UUID_REGEX.test(request.params.id)) {
+        return reply.code(400).send({ error: 'Invalid server ID format' });
+      }
       try {
         const server = await getServer(db, request.params.id);
         if (!server) {
@@ -145,6 +150,9 @@ export async function serverRoutes(fastify: FastifyInstance) {
   fastify.delete<{ Params: { id: string } }>(
     '/servers/:id',
     async (request, reply) => {
+      if (!request.params.id || !UUID_REGEX.test(request.params.id)) {
+        return reply.code(400).send({ error: 'Invalid server ID format' });
+      }
       try {
         const deleted = await deleteServer(db, request.params.id);
         if (!deleted) {

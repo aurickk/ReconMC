@@ -12,6 +12,8 @@ import { agentRoutes } from './routes/agents.js';
 import { logger } from './logger.js';
 import { requireApiKey, isAuthDisabled } from './middleware/auth.js';
 import { isRedisAvailable } from './db/redis.js';
+import { createDb } from './db/index.js';
+import { startStuckTaskRecovery } from './services/redisQueueService.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
@@ -132,4 +134,8 @@ export async function startCoordinatorServer(
   const server = await createCoordinatorServer(allowedOrigins);
   await server.listen({ port, host });
   logger.info(`Coordinator listening on http://${host}:${port}`);
+
+  // Start periodic recovery of tasks stuck in "processing" state
+  const db = createDb();
+  startStuckTaskRecovery(db);
 }

@@ -1,5 +1,5 @@
 import { runFullScan } from './scanner.js';
-import { setTaskContext, clearTaskContext, interceptConsole, logger, currentTaskId } from './logger.js';
+import { setTaskContext, clearTaskContext, interceptConsole, logger } from './logger.js';
 import { AGENT_ID, COORDINATOR_URL } from './config.js';
 import type { Account } from '@reconmc/bot';
 import { setTokenRefreshCallback, clearTokenRefreshCallback } from '@reconmc/bot';
@@ -87,44 +87,62 @@ async function claimTask(base: string): Promise<{
   return data;
 }
 
-async function completeTask(base: string, queueId: string, result: unknown): Promise<boolean> {
-  try {
-    const response = await fetch(`${base}/api/queue/${queueId}/complete`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ result }),
-      // Add timeout to prevent hanging on unresponsive coordinator
-      signal: AbortSignal.timeout(10000), // 10 second timeout
-    });
-    if (!response.ok) {
-      logger.error(`[Worker] completeTask failed: HTTP ${response.status}`);
-      return false;
+async function completeTask(base: string, queueId: string, result: unknown): Promise<void> {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 2000;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(`${base}/api/queue/${queueId}/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ result }),
+      });
+
+      if (res.ok) return;
+
+      const body = await res.text().catch(() => '');
+      logger.warn(`[Agent] completeTask attempt ${attempt}/${MAX_RETRIES} failed: HTTP ${res.status} - ${body}`);
+    } catch (err) {
+      logger.warn(`[Agent] completeTask attempt ${attempt}/${MAX_RETRIES} network error: ${err}`);
     }
-    return true;
-  } catch (err) {
-    logger.error(`[Worker] completeTask error: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
+
+    if (attempt < MAX_RETRIES) {
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
+    }
   }
+
+  // All retries exhausted - throw so the catch block can call failTask
+  throw new Error(`Failed to complete task ${queueId} after ${MAX_RETRIES} attempts`);
 }
 
-async function failTask(base: string, queueId: string, errorMessage: string): Promise<boolean> {
-  try {
-    const response = await fetch(`${base}/api/queue/${queueId}/fail`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ errorMessage }),
-      // Add timeout to prevent hanging on unresponsive coordinator
-      signal: AbortSignal.timeout(10000), // 10 second timeout
-    });
-    if (!response.ok) {
-      logger.error(`[Worker] failTask failed: HTTP ${response.status}`);
-      return false;
+async function failTask(base: string, queueId: string, errorMessage: string): Promise<void> {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 2000;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(`${base}/api/queue/${queueId}/fail`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ errorMessage }),
+      });
+
+      if (res.ok) return;
+
+      const body = await res.text().catch(() => '');
+      logger.warn(`[Agent] failTask attempt ${attempt}/${MAX_RETRIES} failed: HTTP ${res.status} - ${body}`);
+    } catch (err) {
+      logger.warn(`[Agent] failTask attempt ${attempt}/${MAX_RETRIES} network error: ${err}`);
     }
-    return true;
-  } catch (err) {
-    logger.error(`[Worker] failTask error: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
+
+    if (attempt < MAX_RETRIES) {
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
+    }
   }
+
+  // All retries exhausted - log critical error (can't do much else)
+  logger.error(`[Agent] CRITICAL: Failed to report task ${queueId} as failed after ${MAX_RETRIES} attempts. Task may be stuck in processing.`);
 }
 
 /**
@@ -261,13 +279,7 @@ export async function runWorker(): Promise<void> {
 
       // Flush any pending logs before completing the task
       await clearTaskContext();
-
-      // Try to complete task - if it fails, still continue to next task
-      const completed = await completeTask(base, queueId, fullResult);
-      if (!completed) {
-        logger.error(`[Task] ${queueId} - Failed to report completion to coordinator (task may be stuck)`);
-        // Continue anyway - don't let coordinator issues block the worker
-      }
+      await completeTask(base, queueId, fullResult);
     } catch (err) {
       if (scanTimeoutHandle) {
         clearTimeout(scanTimeoutHandle);
@@ -290,18 +302,9 @@ export async function runWorker(): Promise<void> {
       }
 
       logger.error(`[Task] ${queueId} - FAILED: ${message}${details} (Time: ${scanTime}ms)`);
-
-      // Only clear context if not already cleared
-      if (currentTaskId) {
-        await clearTaskContext();
-      }
-
-      // Try to fail task - if it fails, still continue to next task
-      const failed = await failTask(base, queueId, message);
-      if (!failed) {
-        logger.error(`[Task] ${queueId} - Failed to report failure to coordinator (task may be stuck)`);
-        // Continue anyway - don't let coordinator issues block the worker
-      }
+      // Flush logs before failing the task
+      await clearTaskContext();
+      await failTask(base, queueId, message);
     }
     // Note: Token refresh callback persists across tasks for the same account
     // It's only cleared when a different account is assigned or agent shuts down

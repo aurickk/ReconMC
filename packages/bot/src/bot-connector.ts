@@ -278,8 +278,16 @@ async function createBot(
     botOptions.auth = 'offline';
   } else if (options.account.type === 'microsoft') {
     // Authenticate using our own flow (bypass prismarine-auth completely)
+    // Route auth API calls through the same proxy to avoid rate limiting
+    const authProxy = options.proxy ? {
+      host: options.proxy.host,
+      port: options.proxy.port,
+      type: options.proxy.type,
+      username: options.proxy.username,
+      password: options.proxy.password,
+    } : undefined;
     logger.debug('[BotConnector] Fetching Microsoft auth...');
-    const authResult = await getAccountAuth(options.account);
+    const authResult = await getAccountAuth(options.account, authProxy);
 
     if (!authResult?.success) {
       logger.debug(`[BotConnector] Failed to fetch auth: ${authResult?.error ?? 'unknown error'}`);

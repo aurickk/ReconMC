@@ -1,9 +1,36 @@
 import type { FastifyInstance } from 'fastify';
 import { createDb } from '../db/index.js';
-import { eq } from 'drizzle-orm';
-import { accounts } from '../db/schema.js';
+import { eq, and, lt } from 'drizzle-orm';
+import { accounts, proxies } from '../db/schema.js';
 import type { NewAccount } from '../db/schema.js';
 import { validateAccount } from '../services/account-validator.js';
+import type { SocksProxyConfig } from '../services/proxied-fetch.js';
+
+/**
+ * Pick a random available proxy from the pool for API calls.
+ * Returns undefined if no proxies are available (falls back to direct).
+ */
+async function pickProxyFromPool(db: ReturnType<typeof createDb>): Promise<SocksProxyConfig | undefined> {
+  try {
+    const [proxy] = await db
+      .select()
+      .from(proxies)
+      .where(and(eq(proxies.isActive, true), lt(proxies.currentUsage, proxies.maxConcurrent)))
+      .limit(1);
+
+    if (!proxy) return undefined;
+
+    return {
+      host: proxy.host,
+      port: proxy.port,
+      type: (proxy.protocol === 'socks4' ? 'socks4' : 'socks5') as 'socks4' | 'socks5',
+      username: proxy.username ?? undefined,
+      password: proxy.password ?? undefined,
+    };
+  } catch {
+    return undefined; // Fall back to direct connection
+  }
+}
 
 export async function accountRoutes(fastify: FastifyInstance) {
   const db = createDb();
@@ -51,12 +78,16 @@ export async function accountRoutes(fastify: FastifyInstance) {
       return reply.code(400).send({ error: 'type must be microsoft or cracked' });
     }
 
+    // Pick a proxy from the pool for Microsoft API calls (avoids rate limiting)
+    const proxy = body.type === 'microsoft' ? await pickProxyFromPool(db) : undefined;
+
     // Validate account credentials (with refresh token for Microsoft accounts)
     const validation = await validateAccount(
       body.type,
       body.accessToken ?? null,
       body.username ?? null,
-      body.refreshToken ?? null
+      body.refreshToken ?? null,
+      proxy
     );
 
     if (!validation.valid) {
@@ -92,11 +123,13 @@ export async function accountRoutes(fastify: FastifyInstance) {
 
     // If updating access token, re-validate the account
     if (body.accessToken !== undefined && existing.type === 'microsoft') {
+      const proxy = await pickProxyFromPool(db);
       const validation = await validateAccount(
         existing.type,
         body.accessToken,
         body.username ?? existing.username ?? null,
-        body.refreshToken ?? existing.refreshToken ?? null
+        body.refreshToken ?? existing.refreshToken ?? null,
+        proxy
       );
 
       const [updated] = await db
@@ -139,11 +172,13 @@ export async function accountRoutes(fastify: FastifyInstance) {
 
       fastify.log.info(`[Accounts] Validating account ${request.params.id} (type: ${existing.type})`);
 
+      const proxy = existing.type === 'microsoft' ? await pickProxyFromPool(db) : undefined;
       const validation = await validateAccount(
         existing.type,
         existing.accessToken,
         existing.username,
-        existing.refreshToken
+        existing.refreshToken,
+        proxy
       );
 
       if (validation.valid) {
@@ -229,6 +264,9 @@ export async function accountRoutes(fastify: FastifyInstance) {
       const accountsToInsert: NewAccount[] = [];
       const validationResults: Array<{ index: number; valid: boolean; username?: string; error?: string }> = [];
 
+      // Pick a proxy once for the batch (avoids hitting pool for every account)
+      const batchProxy = await pickProxyFromPool(db);
+
       for (let i = 0; i < list.length; i++) {
         const a = list[i];
         const type = a.type === 'cracked' ? 'cracked' : 'microsoft';
@@ -237,7 +275,8 @@ export async function accountRoutes(fastify: FastifyInstance) {
           type,
           a.accessToken ?? null,
           a.username ?? null,
-          a.refreshToken ?? null
+          a.refreshToken ?? null,
+          type === 'microsoft' ? batchProxy : undefined
         );
 
         validationResults.push({

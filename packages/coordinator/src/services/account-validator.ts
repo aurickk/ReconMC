@@ -2,7 +2,13 @@
  * Microsoft Account Validation Service
  * Validates Microsoft tokens and retrieves Minecraft profile information
  * Includes token refresh capability for expired access tokens
+ *
+ * All API calls are optionally routed through a SOCKS proxy from the pool
+ * to distribute requests across IPs and avoid rate limiting.
  */
+
+import type { SocksProxyConfig } from './proxied-fetch.js';
+import { createFetchFn } from './proxied-fetch.js';
 
 const MC_PROFILE_URL = 'https://api.minecraftservices.com/minecraft/profile';
 const MICROSOFT_TOKEN_URL = 'https://login.live.com/oauth20_token.srf';
@@ -83,10 +89,11 @@ function extractProfileFromSessionToken(token: string): { id: string; name: stri
  * Validate Microsoft access token and retrieve Minecraft profile
  */
 async function validateTokenWithProfile(
-  accessToken: string
+  accessToken: string,
+  fetchFn: typeof fetch = globalThis.fetch
 ): Promise<{ valid: boolean; statusCode: number; profile?: { id: string; name: string }; error?: string }> {
   try {
-    const response = await fetch(MC_PROFILE_URL, {
+    const response = await fetchFn(MC_PROFILE_URL, {
       headers: {
         'Authorization': `Bearer ${accessToken}`,
       },
@@ -127,7 +134,8 @@ async function validateTokenWithProfile(
  * IMPORTANT: refreshToken is NOT encoded - it contains special characters that are part of the token format
  */
 async function refreshMicrosoftToken(
-  refreshToken: string
+  refreshToken: string,
+  fetchFn: typeof fetch = globalThis.fetch
 ): Promise<{ access_token: string; refresh_token?: string } | null> {
   for (const clientId of AZURE_CLIENT_IDS) {
     for (const scope of SCOPE_COMBOS) {
@@ -136,7 +144,7 @@ async function refreshMicrosoftToken(
         // refreshToken and scope are sent AS-IS (they have special chars that are part of the format)
         const body = `client_id=${encodeURIComponent(clientId)}&refresh_token=${refreshToken}&grant_type=refresh_token&redirect_uri=${encodeURIComponent('https://login.live.com/oauth20_desktop.srf')}&scope=${scope}`;
 
-        const response = await fetch(MICROSOFT_TOKEN_URL, {
+        const response = await fetchFn(MICROSOFT_TOKEN_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -175,14 +183,15 @@ async function refreshMicrosoftToken(
  * Authenticate with Xbox Live, trying multiple ticket formats
  */
 async function authenticateXboxLive(
-  accessToken: string
+  accessToken: string,
+  fetchFn: typeof fetch = globalThis.fetch
 ): Promise<{ token: string; userHash: string } | null> {
   for (let i = 0; i < TICKET_FORMATS.length; i++) {
     const formatFn = TICKET_FORMATS[i];
     try {
       const rpsTicket = formatFn(accessToken);
 
-      const response = await fetch(XBL_AUTH_URL, {
+      const response = await fetchFn(XBL_AUTH_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -235,10 +244,11 @@ async function authenticateXboxLive(
  * Get XSTS token
  */
 async function getXSTSToken(
-  xblToken: string
+  xblToken: string,
+  fetchFn: typeof fetch = globalThis.fetch
 ): Promise<{ token: string; userHash: string } | null> {
   try {
-    const response = await fetch(XSTS_AUTH_URL, {
+    const response = await fetchFn(XSTS_AUTH_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -288,11 +298,12 @@ async function getXSTSToken(
 async function authenticateMinecraft(
   userHash: string,
   xstsToken: string,
-  retries: number = 3
+  retries: number = 3,
+  fetchFn: typeof fetch = globalThis.fetch
 ): Promise<string | null> {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const response = await fetch(MC_LOGIN_URL, {
+      const response = await fetchFn(MC_LOGIN_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -331,22 +342,23 @@ async function authenticateMinecraft(
  * Full refresh flow: Microsoft -> Xbox Live -> XSTS -> Minecraft
  */
 async function fullRefreshFlow(
-  refreshToken: string
+  refreshToken: string,
+  fetchFn: typeof fetch = globalThis.fetch
 ): Promise<{ success: true; accessToken: string; refreshToken: string; profile: { id: string; name: string } } | { success: false; error: string }> {
   // Step 1: Refresh Microsoft token
-  const msToken = await refreshMicrosoftToken(refreshToken);
+  const msToken = await refreshMicrosoftToken(refreshToken, fetchFn);
   if (!msToken) {
     return { success: false, error: 'Failed to refresh Microsoft token (all client/scope combinations failed). The refresh token may be expired.' };
   }
 
   // Step 2: Authenticate with Xbox Live
-  const xblResponse = await authenticateXboxLive(msToken.access_token);
+  const xblResponse = await authenticateXboxLive(msToken.access_token, fetchFn);
   if (!xblResponse) {
     return { success: false, error: 'Failed to authenticate with Xbox Live (all ticket formats failed)' };
   }
 
   // Step 3: Get XSTS token
-  const xstsResponse = await getXSTSToken(xblResponse.token);
+  const xstsResponse = await getXSTSToken(xblResponse.token, fetchFn);
   if (!xstsResponse) {
     return { success: false, error: 'Failed to get XSTS token. The account may not own Minecraft or does not have Xbox Live.' };
   }
@@ -354,19 +366,21 @@ async function fullRefreshFlow(
   // Step 4: Authenticate with Minecraft
   const mcAccessToken = await authenticateMinecraft(
     xstsResponse.userHash,
-    xstsResponse.token
+    xstsResponse.token,
+    3,
+    fetchFn
   );
   if (!mcAccessToken) {
     return { success: false, error: 'Failed to authenticate with Minecraft services' };
   }
 
   // Step 5: Validate and get profile
-  let profileResult = await validateTokenWithProfile(mcAccessToken);
+  let profileResult = await validateTokenWithProfile(mcAccessToken, fetchFn);
 
   // If rate limited, wait and retry once
   if (profileResult.statusCode === 429) {
     await new Promise(r => setTimeout(r, 5000));
-    profileResult = await validateTokenWithProfile(mcAccessToken);
+    profileResult = await validateTokenWithProfile(mcAccessToken, fetchFn);
   }
 
   // If still failing, try to extract profile from the token itself
@@ -401,8 +415,11 @@ async function fullRefreshFlow(
  */
 export async function validateMicrosoftAccount(
   accessToken: string,
-  refreshToken?: string
+  refreshToken?: string,
+  proxy?: SocksProxyConfig
 ): Promise<ValidationResult> {
+  const fetchFn = createFetchFn(proxy);
+
   if (!accessToken || typeof accessToken !== 'string' || accessToken.length === 0) {
     return {
       valid: false,
@@ -411,7 +428,7 @@ export async function validateMicrosoftAccount(
   }
 
   // First, try to validate the access token
-  const validation = await validateTokenWithProfile(accessToken);
+  const validation = await validateTokenWithProfile(accessToken, fetchFn);
 
   if (validation.valid && validation.profile) {
     return {
@@ -431,7 +448,7 @@ export async function validateMicrosoftAccount(
       };
     }
 
-    const refreshResult = await fullRefreshFlow(refreshToken);
+    const refreshResult = await fullRefreshFlow(refreshToken, fetchFn);
 
     if (refreshResult.success) {
       return {
@@ -469,11 +486,12 @@ export async function validateAccount(
   type: string,
   accessToken: string | null | undefined,
   username: string | null | undefined,
-  refreshToken?: string | null
+  refreshToken?: string | null,
+  proxy?: SocksProxyConfig
 ): Promise<ValidationResult> {
   // For Microsoft accounts, validate the access token
   if (type === 'microsoft' && accessToken) {
-    return await validateMicrosoftAccount(accessToken, refreshToken ?? undefined);
+    return await validateMicrosoftAccount(accessToken, refreshToken ?? undefined, proxy);
   }
 
   // For cracked accounts, just validate username exists

@@ -9,7 +9,7 @@ interface LogEntry {
   timestamp: number;
 }
 
-export let currentTaskId: string | null = null;
+let currentTaskId: string | null = null;
 let logBuffer: LogEntry[] = [];
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 const FLUSH_INTERVAL_MS = 2000;
