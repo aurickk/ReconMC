@@ -7,11 +7,14 @@ import * as schema from './schema.js';
 const defaultDatabaseUrl = `postgres://reconmc:${process.env.POSTGRES_PASSWORD || 'reconmc'}@postgres:5432/reconmc`;
 const connectionString = process.env.DATABASE_URL || defaultDatabaseUrl;
 
+// Define Db type inline to avoid circular reference
+type Db = ReturnType<typeof drizzle<typeof schema>>;
+
 // Singleton connection pool - created once and reused
-let dbInstance: ReturnType<typeof createDb> | null = null;
+let dbInstance: Db | null = null;
 let poolInstance: pg.Pool | null = null;
 
-export function createDb() {
+export function createDb(): Db {
   // Return existing instance if already created
   if (dbInstance) {
     return dbInstance;
@@ -19,7 +22,7 @@ export function createDb() {
 
   // Create new pool and drizzle instance
   poolInstance = new pg.Pool({ connectionString });
-  dbInstance = drizzle(poolInstance, { schema });
+  dbInstance = drizzle(poolInstance, { schema }) as Db;
 
   return dbInstance;
 }
@@ -36,5 +39,5 @@ export async function closeDb(): Promise<void> {
   }
 }
 
-export type Db = ReturnType<typeof createDb>;
+export type { Db };
 export * from './schema.js';

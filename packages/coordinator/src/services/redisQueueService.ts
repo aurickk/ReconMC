@@ -3,7 +3,7 @@ import type { Db } from '../db/index.js';
 import { scanQueue, servers, agents, taskLogs } from '../db/schema.js';
 import type { NewScanQueue, ScanQueue } from '../db/schema.js';
 import { resolveServerIp, PrivateIpError, parseServerAddress } from './ipResolver.js';
-import { allocateResourcesTx, releaseResourcesTx } from './resourceAllocator.js';
+import { allocateResourcesTx, releaseResourcesTx, type Transaction } from './resourceAllocator.js';
 import {
   getRedisClient,
   safeRedisCommand,
@@ -130,7 +130,9 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
     .where(or(eq(scanQueue.status, 'pending'), eq(scanQueue.status, 'processing')));
 
   const queueKeys = new Set(
-    existingQueue.map((r) => getDedupeKey(r.resolvedIp ?? '', r.port, r.hostname ?? ''))
+    existingQueue.map((r: { resolvedIp: string | null; port: number; hostname: string | null }) =>
+      getDedupeKey(r.resolvedIp ?? '', r.port, r.hostname ?? '')
+    )
   );
 
   for (const r of uniqueResolved) {
@@ -144,7 +146,7 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
   }
 
   // Add to PostgreSQL using bulk insert
-  const valuesToAdd = toAdd.map(r => ({
+  const valuesToAdd = toAdd.filter((r): r is NonNullable<typeof r> => r !== null).map(r => ({
     serverAddress: r.address,
     hostname: r.hostname,
     resolvedIp: r.resolvedIp,
@@ -169,7 +171,7 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
     });
 
     // Find the original hostname for this item
-    const originalItem = toAdd.find(r => r.address === item.serverAddress && r.port === item.port);
+    const originalItem = toAdd.find((r) => r !== null && r.address === item.serverAddress && r.port === item.port);
 
     // Add to Redis pending queue as a List (not Hash)
     await safeRedisCommand(async (client) => {
@@ -312,7 +314,7 @@ async function claimFromQueueRedis(
   try {
     // Use a single transaction for both resource allocation and queue updates
     return await db.transaction(async (tx) => {
-      const resources = await allocateResourcesTx(tx);
+      const resources = await allocateResourcesTx(tx as Transaction);
       if (!resources) {
         // No resources available — remove the specific item from processing and push back to pending.
         // Using lrem + lpush instead of blind lmove to avoid moving a different agent's item.
@@ -400,7 +402,7 @@ async function claimFromQueuePostgres(db: Db, agentId: string): Promise<ClaimedQ
 
     if (!item) return null;
 
-    const resources = await allocateResourcesTx(tx);
+    const resources = await allocateResourcesTx(tx as Transaction);
     if (!resources) return null;
 
     await tx
@@ -531,7 +533,7 @@ async function cleanupOrphanedProcessingItems(
       .from(scanQueue)
       .where(eq(scanQueue.status, 'processing'));
 
-    const pgProcessingIds = new Set(pgProcessing.map((item) => item.id));
+    const pgProcessingIds = new Set(pgProcessing.map((item: { id: string }) => item.id));
 
     for (const itemStr of processingList) {
       try {
@@ -610,7 +612,7 @@ export async function completeScan(
 
     // Release resources within the same transaction to prevent inconsistency
     if (item.assignedProxyId && item.assignedAccountId) {
-      await releaseResourcesTx(tx, item.assignedProxyId, item.assignedAccountId);
+      await releaseResourcesTx(tx as Transaction, item.assignedProxyId, item.assignedAccountId);
     }
 
     // Clear agent's currentQueueId and set status to idle
@@ -638,7 +640,7 @@ export async function completeScan(
       result: errorMessage ? null : result,
       errorMessage: errorMessage ?? undefined,
       duration: duration,
-      logs: logs.map(log => ({
+      logs: logs.map((log: { level: string; message: string; timestamp?: Date }) => ({
         level: log.level,
         message: log.message,
         timestamp: log.timestamp?.toISOString() ?? completedAt.toISOString(),

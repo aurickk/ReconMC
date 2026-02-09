@@ -1,5 +1,7 @@
 import type { ProxyConfig } from '@reconmc/scanner';
-// Re-export account types from auth module (single source of truth)
+// Import account types from auth module (single source of truth)
+import type { CrackedAccount, MicrosoftTokenAccount, Account } from './auth/types.js';
+// Re-export for convenience
 export type { CrackedAccount, MicrosoftTokenAccount, Account } from './auth/types.js';
 
 /**

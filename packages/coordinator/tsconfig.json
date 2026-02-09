@@ -5,6 +5,9 @@
     "rootDir": "./src",
     "composite": true
   },
+  "references": [
+    { "path": "../scanner" }
+  ],
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }

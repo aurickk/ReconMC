@@ -159,7 +159,7 @@ export async function listOnlineAgents(db: Db): Promise<Array<typeof agents.$inf
       // Get full agent data from PostgreSQL
       const list = await db.select().from(agents);
       // Mark agents as online/offline based on Redis set
-      return list.map((a) => ({
+      return list.map((a: typeof agents.$inferSelect) => ({
         ...a,
         offline: !validIds.includes(a.id),
       }));
@@ -169,7 +169,7 @@ export async function listOnlineAgents(db: Db): Promise<Array<typeof agents.$inf
   // Fallback to PostgreSQL with cleanup
   await removeOfflineAgents(db);
   const list = await db.select().from(agents);
-  return list.map((a) => ({
+  return list.map((a: typeof agents.$inferSelect) => ({
     ...a,
     offline: now - new Date(a.lastHeartbeat).getTime() > HEARTBEAT_TIMEOUT_MS,
   }));

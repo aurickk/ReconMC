@@ -8,9 +8,10 @@ export interface AllocatedResources {
   account: Account;
 }
 
-type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+// Use any for transaction type - drizzle's type extraction is too complex
+export type Transaction = Db extends { transaction: (fn: (tx: infer T) => Promise<any>) => Promise<any> } ? T : never;
 
-export async function allocateResourcesTx(tx: Tx): Promise<AllocatedResources | null> {
+export async function allocateResourcesTx(tx: Transaction): Promise<AllocatedResources | null> {
   const availableProxy = await tx
     .select()
     .from(proxies)
@@ -60,7 +61,7 @@ export async function allocateResourcesTx(tx: Tx): Promise<AllocatedResources | 
 }
 
 export async function allocateResources(db: Db, _agentId: string): Promise<AllocatedResources | null> {
-  return db.transaction((tx) => allocateResourcesTx(tx));
+  return db.transaction((tx) => allocateResourcesTx(tx as Transaction));
 }
 
 export async function releaseResources(
@@ -68,11 +69,11 @@ export async function releaseResources(
   proxyId: string,
   accountId: string
 ): Promise<void> {
-  await db.transaction(async (tx) => releaseResourcesTx(tx, proxyId, accountId));
+  await db.transaction(async (tx) => releaseResourcesTx(tx as Transaction, proxyId, accountId));
 }
 
 export async function releaseResourcesTx(
-  tx: Tx,
+  tx: Transaction,
   proxyId: string,
   accountId: string
 ): Promise<void> {

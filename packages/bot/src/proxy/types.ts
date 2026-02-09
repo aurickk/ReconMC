@@ -2,6 +2,8 @@
  * Proxy configuration types
  */
 
+import type { ProxyConfig } from '@reconmc/scanner';
+
 // Re-export ProxyConfig from @reconmc/scanner
 export type { ProxyConfig } from '@reconmc/scanner';
 
