@@ -9,7 +9,8 @@ import {
 } from '../services/redisQueueService.js';
 import { deleteScanHistory } from '../services/scanQueueManager.js';
 import { eq, or, and, sql } from 'drizzle-orm';
-import { servers } from '../db/schema.js';
+import { servers, scanQueue, taskLogs } from '../db/schema.js';
+import { getRedisClient, safeRedisCommand, REDIS_KEYS } from '../db/redis.js';
 
 export async function serverRoutes(fastify: FastifyInstance) {
   const db = createDb();
@@ -173,6 +174,44 @@ export async function serverRoutes(fastify: FastifyInstance) {
       } catch (err) {
         fastify.log.error(err);
         return reply.code(500).send({ error: 'Failed to delete scan', message: String(err) });
+      }
+    }
+  );
+
+  /**
+   * DELETE /api/servers/purge
+   * Delete ALL servers, scan queue, and task logs
+   * Does NOT affect accounts, proxies, or agents
+   */
+  fastify.delete(
+    '/servers/purge',
+    async (request, reply) => {
+      try {
+        // Delete from PostgreSQL
+        const [serversResult, queueResult, logsResult] = await Promise.all([
+          db.delete(servers).returning(),
+          db.delete(scanQueue).returning(),
+          db.delete(taskLogs).returning(),
+        ]);
+
+        // Clear Redis queue data
+        await safeRedisCommand(async (client) => {
+          await client.del(REDIS_KEYS.QUEUE_PENDING);
+          await client.del(REDIS_KEYS.QUEUE_PROCESSING);
+          await client.del(REDIS_KEYS.QUEUE_DUPLICATES);
+        });
+
+        return reply.send({
+          message: 'Server data purged successfully',
+          deleted: {
+            servers: serversResult.length,
+            queueItems: queueResult.length,
+            taskLogs: logsResult.length,
+          },
+        });
+      } catch (err) {
+        fastify.log.error(err);
+        return reply.code(500).send({ error: 'Failed to purge server data', message: String(err) });
       }
     }
   );
