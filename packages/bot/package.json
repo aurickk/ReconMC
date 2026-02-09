@@ -16,7 +16,7 @@
     "proxy"
   ],
   "dependencies": {
-    "@reconmc/scanner": "workspace:*",
+    "@reconmc/scanner": "*",
     "minecraft-protocol": "^1.63.0",
     "mineflayer": "^4.34.0",
     "socks": "^2.8.7"

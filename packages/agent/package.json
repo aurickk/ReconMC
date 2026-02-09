@@ -10,8 +10,8 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@reconmc/bot": "file:../bot",
-    "@reconmc/scanner": "file:../scanner"
+    "@reconmc/bot": "*",
+    "@reconmc/scanner": "*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
