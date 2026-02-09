@@ -102,7 +102,7 @@ async function completeTask(base: string, queueId: string, result: unknown): Pro
     }
     return true;
   } catch (err) {
-    logger.error(`[Worker] completeTask error:`, err instanceof Error ? err.message : String(err));
+    logger.error(`[Worker] completeTask error: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
 }
@@ -122,7 +122,7 @@ async function failTask(base: string, queueId: string, errorMessage: string): Pr
     }
     return true;
   } catch (err) {
-    logger.error(`[Worker] failTask error:`, err instanceof Error ? err.message : String(err));
+    logger.error(`[Worker] failTask error: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
 }
