@@ -5,6 +5,10 @@
 
 - [ ] Web Dashboard - Frontend UI for viewing scan results, managing servers/accounts/proxies, and monitoring queue status
 - [ ] Discord Bot - Discord integration for submitting servers, viewing results, and managing the system via commands
+- [ ] Server anti-bot measures
+- [ ] Autocomplete player list query
+- [ ] Gamemode navigation
+- [ ] ViaVersion Detection
 
 # ReconMC
 
@@ -117,7 +121,7 @@ Central API server with Fastify, task queue management, and database persistence
 **API Authentication:**
 
 Protected routes require an API key passed via the `X-API-Key` header. Set the `RECONMC_API_KEY` environment variable to enable authentication.
-
+SSSS
 **Public Routes** (no authentication):
 - Agent operations (agents in Docker network)
 - Server viewing and submission
