@@ -47,6 +47,7 @@ export async function createCoordinatorServer(allowedOrigins?: string[]) {
     },
     trustProxy: true,
     disableRequestLogging: true, // Disable automatic request/response logging
+    bodyLimit: 10 * 1024 * 1024, // 10MB - allows adding large server lists
   });
 
   await fastify.register(cors, {
