@@ -168,6 +168,24 @@ export async function runFullScan(input: FullScanInput): Promise<FullScanResult>
   result.serverMode = serverMode;
   logger.info(`[Mode] Server mode: ${serverMode}`);
 
+  // Check if server protocol version is supported
+  // minecraft-protocol@^1.63.0 supports up to protocol 767 (1.20.4)
+  const MAX_SUPPORTED_PROTOCOL = 767;
+  const serverProtocol = pingResult.status?.data?.version?.protocol;
+  if (serverProtocol && serverProtocol > MAX_SUPPORTED_PROTOCOL) {
+    const serverVersion = pingResult.status?.data?.version?.name || 'unknown';
+    logger.warn(`[Protocol] Unsupported version ${serverVersion} (protocol ${serverProtocol}), max supported is ${MAX_SUPPORTED_PROTOCOL}`);
+    result.connection = {
+      success: false,
+      host: input.host,
+      port: input.port,
+      username: 'redacted',
+      attempts: 0,
+      error: { code: 'UNSUPPORTED_PROTOCOL', message: `Server version ${serverVersion} (protocol ${serverProtocol}) is not supported` },
+    };
+    return result;
+  }
+
   if (serverMode === 'online' && input.account.type !== 'microsoft') {
     logger.warn(`[Mode] Account mismatch: Server requires online-mode authentication`);
     result.connection = {
@@ -190,7 +208,7 @@ export async function runFullScan(input: FullScanInput): Promise<FullScanResult>
       fallbackAccount: input.fallbackAccount,
       proxy,
       timeout: 15000,
-      retries: 2,
+      retries: 3,
       retryDelay: 2000,
       collectPlugins,
       pluginTimeout: input.pluginTimeout ?? 5000,

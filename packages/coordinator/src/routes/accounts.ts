@@ -5,6 +5,7 @@ import { accounts, proxies } from '../db/schema.js';
 import type { NewAccount } from '../db/schema.js';
 import { validateAccount } from '../services/account-validator.js';
 import type { SocksProxyConfig } from '../services/proxied-fetch.js';
+import { requireApiKey } from '../middleware/auth.js';
 
 /**
  * Pick a random available proxy from the pool for API calls.
@@ -35,7 +36,7 @@ async function pickProxyFromPool(db: ReturnType<typeof createDb>): Promise<Socks
 export async function accountRoutes(fastify: FastifyInstance) {
   const db = createDb();
 
-  fastify.get('/accounts', async (_request, reply) => {
+  fastify.get('/accounts', { onRequest: requireApiKey }, async (_request, reply) => {
     const list = await db.select({
       id: accounts.id,
       type: accounts.type,
@@ -52,8 +53,8 @@ export async function accountRoutes(fastify: FastifyInstance) {
     return reply.send(list);
   });
 
-  // Export accounts (returns all account data including tokens for re-importing)
-  fastify.get('/accounts/export', async (_request, reply) => {
+  // Export accounts (returns all account data including tokens for re-importing) (protected)
+  fastify.get('/accounts/export', { onRequest: requireApiKey }, async (_request, reply) => {
     const list = await db.select({
       type: accounts.type,
       username: accounts.username,
@@ -72,7 +73,7 @@ export async function accountRoutes(fastify: FastifyInstance) {
       refreshToken?: string;
       maxConcurrent?: number;
     };
-  }>('/accounts', async (request, reply) => {
+  }>('/accounts', { onRequest: requireApiKey }, async (request, reply) => {
     const body = request.body ?? {};
     if (body.type !== 'microsoft' && body.type !== 'cracked') {
       return reply.code(400).send({ error: 'type must be microsoft or cracked' });
@@ -116,7 +117,7 @@ export async function accountRoutes(fastify: FastifyInstance) {
   fastify.put<{
     Params: { id: string };
     Body: Partial<{ username: string; accessToken: string; refreshToken: string; isActive: boolean; maxConcurrent: number }>;
-  }>('/accounts/:id', async (request, reply) => {
+  }>('/accounts/:id', { onRequest: requireApiKey }, async (request, reply) => {
     const [existing] = await db.select().from(accounts).where(eq(accounts.id, request.params.id)).limit(1);
     if (!existing) return reply.code(404).send({ error: 'Account not found' });
     const body = request.body ?? {};
@@ -163,9 +164,10 @@ export async function accountRoutes(fastify: FastifyInstance) {
     return reply.send(updated);
   });
 
-  // Re-validate an existing account
+  // Re-validate an existing account (protected)
   fastify.post<{ Params: { id: string } }>(
     '/accounts/:id/validate',
+    { onRequest: requireApiKey },
     async (request, reply) => {
       const [existing] = await db.select().from(accounts).where(eq(accounts.id, request.params.id)).limit(1);
       if (!existing) return reply.code(404).send({ error: 'Account not found' });
@@ -212,6 +214,7 @@ export async function accountRoutes(fastify: FastifyInstance) {
   );
 
   // Update account tokens (called by agents after refreshing)
+  // Public - agents are in same Docker network and need to update tokens after Microsoft auth refresh
   fastify.put<{
     Params: { id: string };
     Body: { accessToken: string; refreshToken?: string };
@@ -246,7 +249,7 @@ export async function accountRoutes(fastify: FastifyInstance) {
     return reply.send({ ok: true, account: updated[0]! });
   });
 
-  fastify.delete<{ Params: { id: string } }>('/accounts/:id', async (request, reply) => {
+  fastify.delete<{ Params: { id: string } }>('/accounts/:id', { onRequest: requireApiKey }, async (request, reply) => {
     const deleted = await db.delete(accounts).where(eq(accounts.id, request.params.id)).returning({ id: accounts.id });
     if (deleted.length === 0) return reply.code(404).send({ error: 'Account not found' });
     return reply.code(204).send();
@@ -254,6 +257,7 @@ export async function accountRoutes(fastify: FastifyInstance) {
 
   fastify.post<{ Body: { accounts: Array<{ type: string; username?: string; accessToken?: string; refreshToken?: string }> } }>(
     '/accounts/import',
+    { onRequest: requireApiKey },
     async (request, reply) => {
       const list = request.body?.accounts;
       if (!Array.isArray(list) || list.length === 0) {

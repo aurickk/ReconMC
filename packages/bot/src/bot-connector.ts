@@ -730,15 +730,15 @@ export async function connectBot(
     // If this account type failed completely
     if (lastError) {
       // If it's an auth failure for Microsoft account, don't fall back
-      if (accountType === 'microsoft' && lastError.error?.code === 'AUTH_FAILED') {
-        logger.debug(`[BotConnector] Microsoft auth failed, not falling back`);
-        return lastError;
+      if (lastError.error?.code === 'AUTH_FAILED') {
+        logger.debug(`[BotConnector] Auth failed, not falling back`);
+        return { ...lastError, attempts: retries };
       }
 
-      // If it's an online mode server and auth failed, don't fall back to cracked
-      if (serverMode === 'online' && accountType === 'microsoft') {
-        logger.debug(`[BotConnector] Online mode server, auth failed - not falling back to cracked`);
-        return lastError;
+      // If it's an online mode server and we have no fallback, don't try cracked
+      if (serverMode === 'online' && accountType === 'microsoft' && !options.fallbackAccount) {
+        logger.debug(`[BotConnector] Online mode server with no fallback, returning error`);
+        return { ...lastError, attempts: retries };
       }
 
       // Otherwise, try the next account type

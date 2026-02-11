@@ -11,6 +11,7 @@ import {
 import { eq, or, and, sql } from 'drizzle-orm';
 import { servers, scanQueue, taskLogs } from '../db/schema.js';
 import { getRedisClient, safeRedisCommand, REDIS_KEYS } from '../db/redis.js';
+import { requireApiKey } from '../middleware/auth.js';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -145,10 +146,11 @@ export async function serverRoutes(fastify: FastifyInstance) {
 
   /**
    * DELETE /api/servers/:id
-   * Delete a server record
+   * Delete a server record (protected)
    */
   fastify.delete<{ Params: { id: string } }>(
     '/servers/:id',
+    { onRequest: requireApiKey },
     async (request, reply) => {
       if (!request.params.id || !UUID_REGEX.test(request.params.id)) {
         return reply.code(400).send({ error: 'Invalid server ID format' });
@@ -168,10 +170,11 @@ export async function serverRoutes(fastify: FastifyInstance) {
 
   /**
    * DELETE /api/servers/:id/scan/:timestamp
-   * Delete a specific scan from server's history
+   * Delete a specific scan from server's history (protected)
    */
   fastify.delete<{ Params: { id: string; timestamp: string } }>(
     '/servers/:id/scan/:timestamp',
+    { onRequest: requireApiKey },
     async (request, reply) => {
       try {
         const deleted = await deleteScanHistory(db, request.params.id, decodeURIComponent(request.params.timestamp));
@@ -188,11 +191,12 @@ export async function serverRoutes(fastify: FastifyInstance) {
 
   /**
    * DELETE /api/servers/purge
-   * Delete ALL servers, scan queue, and task logs
+   * Delete ALL servers, scan queue, and task logs (protected)
    * Does NOT affect accounts, proxies, or agents
    */
   fastify.delete(
     '/servers/purge',
+    { onRequest: requireApiKey },
     async (request, reply) => {
       try {
         // Delete from PostgreSQL

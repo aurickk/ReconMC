@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { proxies } from '../db/schema.js';
 import type { NewProxy } from '../db/schema.js';
 import { isPrivateIp } from '../services/ipResolver.js';
+import { requireApiKey } from '../middleware/auth.js';
 
 /**
  * Hostnames that should be blocked for proxy configuration
@@ -70,7 +71,7 @@ function parseWebshareLine(line: string): { host: string; port: number; username
 export async function proxyRoutes(fastify: FastifyInstance) {
   const db = createDb();
 
-  fastify.get('/proxies', async (_request, reply) => {
+  fastify.get('/proxies', { onRequest: requireApiKey }, async (_request, reply) => {
     const list = await db.select({
       id: proxies.id,
       host: proxies.host,
@@ -86,8 +87,8 @@ export async function proxyRoutes(fastify: FastifyInstance) {
     return reply.send(list);
   });
 
-  // Export proxies (returns all proxy data including passwords for re-importing)
-  fastify.get('/proxies/export', async (_request, reply) => {
+  // Export proxies (returns all proxy data including passwords for re-importing) (protected)
+  fastify.get('/proxies/export', { onRequest: requireApiKey }, async (_request, reply) => {
     const list = await db.select({
       host: proxies.host,
       port: proxies.port,
@@ -108,7 +109,7 @@ export async function proxyRoutes(fastify: FastifyInstance) {
       protocol?: string;
       maxConcurrent?: number;
     };
-  }>('/proxies', async (request, reply) => {
+  }>('/proxies', { onRequest: requireApiKey }, async (request, reply) => {
     const body = request.body ?? {};
     if (!body.host || typeof body.port !== 'number') {
       return reply.code(400).send({ error: 'host and port are required' });
@@ -142,7 +143,7 @@ export async function proxyRoutes(fastify: FastifyInstance) {
   fastify.put<{
     Params: { id: string };
     Body: Partial<{ host: string; port: number; username: string; password: string; isActive: boolean; maxConcurrent: number }>;
-  }>('/proxies/:id', async (request, reply) => {
+  }>('/proxies/:id', { onRequest: requireApiKey }, async (request, reply) => {
     const [existing] = await db.select().from(proxies).where(eq(proxies.id, request.params.id)).limit(1);
     if (!existing) return reply.code(404).send({ error: 'Proxy not found' });
     const body = request.body ?? {};
@@ -172,13 +173,13 @@ export async function proxyRoutes(fastify: FastifyInstance) {
     return reply.send(updated);
   });
 
-  fastify.delete<{ Params: { id: string } }>('/proxies/:id', async (request, reply) => {
+  fastify.delete<{ Params: { id: string } }>('/proxies/:id', { onRequest: requireApiKey }, async (request, reply) => {
     const deleted = await db.delete(proxies).where(eq(proxies.id, request.params.id)).returning({ id: proxies.id });
     if (deleted.length === 0) return reply.code(404).send({ error: 'Proxy not found' });
     return reply.code(204).send();
   });
 
-  fastify.post<{ Body: { content: string } }>('/proxies/import', async (request, reply) => {
+  fastify.post<{ Body: { content: string } }>('/proxies/import', { onRequest: requireApiKey }, async (request, reply) => {
     const content = request.body?.content;
     if (typeof content !== 'string') {
       return reply.code(400).send({ error: 'content is required (Webshare format text)' });
