@@ -145,7 +145,7 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
     toAdd.push(r);
   }
 
-  // Add to PostgreSQL using bulk insert
+  // Add to PostgreSQL using bulk insert in batches to avoid stack overflow
   const valuesToAdd = toAdd.filter((r): r is NonNullable<typeof r> => r !== null).map(r => ({
     serverAddress: r.address,
     hostname: r.hostname,
@@ -154,10 +154,18 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
     status: 'pending' as const,
   }));
 
-  const inserted = await db
-    .insert(scanQueue)
-    .values(valuesToAdd)
-    .returning();
+  // Batch insert to avoid Drizzle query builder stack overflow on large datasets
+  const BATCH_SIZE = 500;
+  const inserted: Array<{ id: string; serverAddress: string; hostname: string | null; resolvedIp: string | null; port: number }> = [];
+
+  for (let i = 0; i < valuesToAdd.length; i += BATCH_SIZE) {
+    const batch = valuesToAdd.slice(i, i + BATCH_SIZE);
+    const result = await db
+      .insert(scanQueue)
+      .values(batch)
+      .returning();
+    inserted.push(...result);
+  }
 
   const added: Array<{ id: string; serverAddress: string; resolvedIp: string; port: number }> = [];
 
