@@ -25,12 +25,17 @@ const HTML_ESCAPE_MAP: Record<string, string> = {
 /**
  * Escape HTML entities in a string to prevent XSS
  * Applied to all untrusted text content before storage
+ * Also strips null bytes which PostgreSQL JSONB cannot store
  */
 function escapeHtml(unsafe: unknown): string {
   if (typeof unsafe !== 'string') {
     return String(unsafe ?? '');
   }
-  return unsafe.replace(/[&<>"'/]/g, (char) => HTML_ESCAPE_MAP[char]);
+  // Remove null bytes first (PostgreSQL JSONB limitation)
+  // Then escape HTML entities to prevent XSS
+  return unsafe
+    .replace(/\u0000/g, '')
+    .replace(/[&<>"'/]/g, (char) => HTML_ESCAPE_MAP[char]);
 }
 
 /**
