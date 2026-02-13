@@ -15,7 +15,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --stop-writes-on-bgsave-error no
     volumes:
       - redis_data:/data
     healthcheck:

@@ -2,6 +2,7 @@ import { and, eq, lt, asc, sql } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
 import { proxies, accounts } from '../db/schema.js';
 import type { Proxy, Account } from '../db/schema.js';
+import { logger } from '../logger.js';
 
 export interface AllocatedResources {
   proxy: Proxy;
@@ -20,7 +21,18 @@ export async function allocateResourcesTx(tx: Transaction): Promise<AllocatedRes
     .limit(1)
     .for('update');
 
-  if (availableProxy.length === 0) return null;
+  if (availableProxy.length === 0) {
+    // Log why no proxy is available
+    const proxyCount = await tx.select({ count: sql<number>`count(*)::int` }).from(proxies);
+    const activeProxyCount = await tx.select({ count: sql<number>`count(*)::int` }).from(proxies).where(eq(proxies.isActive, true));
+    const availableProxyCount = await tx
+      .select({ count: sql<number>`count(*)::int` })
+      .from(proxies)
+      .where(and(eq(proxies.isActive, true), lt(proxies.currentUsage, proxies.maxConcurrent)));
+
+    logger.warn(`[ResourceAllocator] No proxy available. Total: ${proxyCount[0]?.count ?? 0}, Active: ${activeProxyCount[0]?.count ?? 0}, Available: ${availableProxyCount[0]?.count ?? 0}`);
+    return null;
+  }
 
   const availableAccount = await tx
     .select()
@@ -36,7 +48,22 @@ export async function allocateResourcesTx(tx: Transaction): Promise<AllocatedRes
     .limit(1)
     .for('update');
 
-  if (availableAccount.length === 0) return null;
+  if (availableAccount.length === 0) {
+    // Log why no account is available
+    const accountCount = await tx.select({ count: sql<number>`count(*)::int` }).from(accounts);
+    const activeAccountCount = await tx.select({ count: sql<number>`count(*)::int` }).from(accounts).where(eq(accounts.isActive, true));
+    const validAccountCount = await tx
+      .select({ count: sql<number>`count(*)::int` })
+      .from(accounts)
+      .where(and(eq(accounts.isActive, true), eq(accounts.isValid, true)));
+    const availableAccountCount = await tx
+      .select({ count: sql<number>`count(*)::int` })
+      .from(accounts)
+      .where(and(eq(accounts.isActive, true), eq(accounts.isValid, true), lt(accounts.currentUsage, accounts.maxConcurrent)));
+
+    logger.warn(`[ResourceAllocator] No account available. Total: ${accountCount[0]?.count ?? 0}, Active: ${activeAccountCount[0]?.count ?? 0}, Valid: ${validAccountCount[0]?.count ?? 0}, Available: ${availableAccountCount[0]?.count ?? 0}`);
+    return null;
+  }
 
   await tx
     .update(proxies)
@@ -53,6 +80,8 @@ export async function allocateResourcesTx(tx: Transaction): Promise<AllocatedRes
       lastUsedAt: new Date(),
     })
     .where(eq(accounts.id, availableAccount[0].id));
+
+  logger.debug(`[ResourceAllocator] Allocated proxy ${availableProxy[0].id} and account ${availableAccount[0].id}`);
 
   return {
     proxy: availableProxy[0],

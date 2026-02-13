@@ -123,22 +123,72 @@ export async function addToQueue(db: Db, input: AddToQueueInput): Promise<AddToQ
   let skipped = 0;
   const toAdd: typeof uniqueResolved = [];
 
-  // Check for existing duplicates in PostgreSQL
-  const existingQueue = await db
-    .select({ resolvedIp: scanQueue.resolvedIp, port: scanQueue.port, hostname: scanQueue.hostname })
-    .from(scanQueue)
-    .where(or(eq(scanQueue.status, 'pending'), eq(scanQueue.status, 'processing')));
+  // Check for existing duplicates using Redis duplicates hash (O(1) per lookup)
+  // Fall back to targeted PostgreSQL queries only for items not in Redis
+  const redisDupKeys = new Set<string>();
 
-  const queueKeys = new Set(
-    existingQueue.map((r: { resolvedIp: string | null; port: number; hostname: string | null }) =>
-      getDedupeKey(r.resolvedIp ?? '', r.port, r.hostname ?? '')
-    )
-  );
+  if (redis && redis.status === 'ready') {
+    try {
+      // Batch check all keys in Redis duplicates hash
+      const pipeline = redis.pipeline();
+      for (const r of uniqueResolved) {
+        if (!r) continue;
+        const key = getDedupeKey(r.resolvedIp, r.port, r.hostname);
+        pipeline.hexists(REDIS_KEYS.QUEUE_DUPLICATES, key);
+      }
+      const results = await pipeline.exec();
+
+      for (let i = 0; i < uniqueResolved.length; i++) {
+        const r = uniqueResolved[i];
+        if (!r) continue;
+        const [err, exists] = results?.[i] ?? [null, 0];
+        if (!err && exists === 1) {
+          const key = getDedupeKey(r.resolvedIp, r.port, r.hostname);
+          redisDupKeys.add(key);
+        }
+      }
+    } catch (err) {
+      logger.warn('[RedisQueueService] Redis duplicate check failed, falling back to PostgreSQL:', err);
+    }
+  }
+
+  // For items not found in Redis, check PostgreSQL using targeted queries with unique index
+  // This is much faster than fetching all pending/processing rows
+  const needsPgCheck = uniqueResolved.filter(r => {
+    if (!r) return false;
+    const key = getDedupeKey(r.resolvedIp, r.port, r.hostname);
+    return !redisDupKeys.has(key);
+  });
+
+  // Batch PostgreSQL check using a single query with IN clause
+  if (needsPgCheck.length > 0) {
+    // Build conditions for each unique (resolvedIp, port) pair
+    const conditions = needsPgCheck
+      .filter((r): r is NonNullable<typeof r> => r !== null)
+      .map(r => and(eq(scanQueue.resolvedIp, r.resolvedIp), eq(scanQueue.port, r.port)));
+
+    if (conditions.length > 0) {
+      // Query in batches to avoid overly large queries
+      const CHECK_BATCH_SIZE = 100;
+      for (let i = 0; i < conditions.length; i += CHECK_BATCH_SIZE) {
+        const batchConditions = conditions.slice(i, i + CHECK_BATCH_SIZE);
+        const existingInPg = await db
+          .select({ resolvedIp: scanQueue.resolvedIp, port: scanQueue.port })
+          .from(scanQueue)
+          .where(or(...batchConditions));
+
+        for (const existing of existingInPg) {
+          const key = getDedupeKey(existing.resolvedIp ?? '', existing.port, null);
+          redisDupKeys.add(key);
+        }
+      }
+    }
+  }
 
   for (const r of uniqueResolved) {
     if (!r) continue;
     const key = getDedupeKey(r.resolvedIp, r.port, r.hostname);
-    if (queueKeys.has(key)) {
+    if (redisDupKeys.has(key)) {
       skipped++;
       continue;
     }

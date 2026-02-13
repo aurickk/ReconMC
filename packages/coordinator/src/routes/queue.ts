@@ -7,6 +7,8 @@ import {
   getQueueStatus,
   getQueueEntries,
 } from '../services/redisQueueService.js';
+import { sql, eq, and, lt } from 'drizzle-orm';
+import { proxies, accounts, agents, scanQueue } from '../db/schema.js';
 
 export async function queueRoutes(fastify: FastifyInstance) {
   const db = createDb();
@@ -22,6 +24,104 @@ export async function queueRoutes(fastify: FastifyInstance) {
     } catch (err) {
       fastify.log.error(err);
       return reply.code(500).send({ error: 'Failed to get queue status', message: String(err) });
+    }
+  });
+
+  /**
+   * GET /api/queue/diagnostics
+   * Get diagnostic information about why agents might be idle
+   * This helps identify resource allocation issues
+   */
+  fastify.get('/queue/diagnostics', async (_request, reply) => {
+    try {
+      // Check proxy availability
+      const proxyStats = await db
+        .select({
+          total: sql<number>`count(*)::int`,
+          active: sql<number>`count(*) FILTER (WHERE is_active = true)::int`,
+          available: sql<number>`count(*) FILTER (WHERE is_active = true AND current_usage < max_concurrent)::int`,
+          totalCapacity: sql<number>`COALESCE(SUM(max_concurrent) FILTER (WHERE is_active = true), 0)::int`,
+          usedCapacity: sql<number>`COALESCE(SUM(current_usage) FILTER (WHERE is_active = true), 0)::int`,
+        })
+        .from(proxies);
+
+      // Check account availability
+      const accountStats = await db
+        .select({
+          total: sql<number>`count(*)::int`,
+          active: sql<number>`count(*) FILTER (WHERE is_active = true)::int`,
+          valid: sql<number>`count(*) FILTER (WHERE is_active = true AND is_valid = true)::int`,
+          available: sql<number>`count(*) FILTER (WHERE is_active = true AND is_valid = true AND current_usage < max_concurrent)::int`,
+          totalCapacity: sql<number>`COALESCE(SUM(max_concurrent) FILTER (WHERE is_active = true AND is_valid = true), 0)::int`,
+          usedCapacity: sql<number>`COALESCE(SUM(current_usage) FILTER (WHERE is_active = true AND is_valid = true), 0)::int`,
+        })
+        .from(accounts);
+
+      // Check agent status
+      const agentStats = await db
+        .select({
+          total: sql<number>`count(*)::int`,
+          idle: sql<number>`count(*) FILTER (WHERE status = 'idle')::int`,
+          busy: sql<number>`count(*) FILTER (WHERE status = 'busy')::int`,
+          stale: sql<number>`count(*) FILTER (WHERE last_heartbeat < NOW() - INTERVAL '70 seconds')::int`,
+        })
+        .from(agents);
+
+      // Check queue status
+      const queueStats = await getQueueStatus(db);
+
+      // Check for stuck processing items
+      const stuckItems = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(scanQueue)
+        .where(
+          and(
+            eq(scanQueue.status, 'processing'),
+            sql`${scanQueue.startedAt} < NOW() - INTERVAL '5 minutes'`
+          )
+        );
+
+      // Determine why agents might be idle
+      const issues: string[] = [];
+
+      if (proxyStats[0]?.total === 0) {
+        issues.push('No proxies configured - add proxies to enable scanning');
+      } else if (proxyStats[0]?.active === 0) {
+        issues.push('All proxies are inactive - activate at least one proxy');
+      } else if (proxyStats[0]?.available === 0) {
+        issues.push(`All proxies at capacity (${proxyStats[0]?.usedCapacity}/${proxyStats[0]?.totalCapacity} slots used) - add more proxies or increase max_concurrent`);
+      }
+
+      if (accountStats[0]?.total === 0) {
+        issues.push('No accounts configured - add accounts to enable scanning');
+      } else if (accountStats[0]?.valid === 0) {
+        issues.push('No valid accounts - all accounts are marked as invalid');
+      } else if (accountStats[0]?.available === 0) {
+        issues.push(`All accounts at capacity (${accountStats[0]?.usedCapacity}/${accountStats[0]?.totalCapacity} slots used) - add more accounts or increase max_concurrent`);
+      }
+
+      if (agentStats[0]?.total === 0) {
+        issues.push('No agents registered - start the agent service');
+      } else if (agentStats[0]?.idle === 0 && queueStats.pending > 0) {
+        issues.push(`All agents are busy (${agentStats[0]?.busy} busy) - scale up agent replicas`);
+      }
+
+      if (stuckItems[0]?.count > 0) {
+        issues.push(`${stuckItems[0]?.count} stuck processing items - run recoverStuckTasks or wait for automatic recovery`);
+      }
+
+      return reply.send({
+        proxies: proxyStats[0],
+        accounts: accountStats[0],
+        agents: agentStats[0],
+        queue: queueStats,
+        stuckItems: stuckItems[0]?.count ?? 0,
+        issues,
+        canProcess: issues.length === 0,
+      });
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.code(500).send({ error: 'Failed to get diagnostics', message: String(err) });
     }
   });
 
