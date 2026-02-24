@@ -1,52 +1,34 @@
 /**
- * Session token authentication handler
- * Based on OpSec mod's implementation
- *
- * Strategy:
- * 1. Try session token first (validate against Minecraft profile API)
- * 2. Only refresh if session token is invalid (401/403)
- * 3. Use multiple client IDs, scopes, and ticket formats for compatibility
- * 4. Report refreshed tokens back to coordinator via callback
+ * Session token authentication handler.
+ * Auth API calls use direct connections (legitimate OAuth) - not proxied.
+ * Only game connections to Minecraft servers require proxy routing.
  */
 
 import type { MicrosoftTokenAccount, AuthResult, TokenRefreshCallback } from './types';
 import type { SocksProxyConfig } from './proxied-fetch';
-import { createFetchFn } from './proxied-fetch';
 import { logger } from '../logger.js';
 import {
   validateTokenWithProfile,
   fullRefreshFlow,
+  getCachedTokenValidity,
 } from '@reconmc/scanner';
 import type { FullRefreshFlowResult } from '@reconmc/scanner';
 
-// Global token refresh callback - can be set by the agent
 let globalTokenRefreshCallback: TokenRefreshCallback | undefined;
 let globalAccountId: string | undefined;
 
-/**
- * Set the token refresh callback for reporting refreshed tokens
- */
 export function setTokenRefreshCallback(accountId: string, callback: TokenRefreshCallback): void {
   globalAccountId = accountId;
   globalTokenRefreshCallback = callback;
 }
 
-/**
- * Clear the token refresh callback
- */
 export function clearTokenRefreshCallback(): void {
   globalAccountId = undefined;
   globalTokenRefreshCallback = undefined;
 }
 
-/**
- * Run the shared fullRefreshFlow and map its result to the bot's AuthResult type.
- */
-async function runRefreshFlow(
-  refreshToken: string,
-  fetchFn: typeof fetch = globalThis.fetch
-): Promise<AuthResult> {
-  const result = await fullRefreshFlow(refreshToken, fetchFn, logger);
+async function runRefreshFlow(refreshToken: string): Promise<AuthResult> {
+  const result = await fullRefreshFlow(refreshToken, globalThis.fetch, logger);
   if (!result.success) {
     return { success: false, error: result.error };
   }
@@ -65,57 +47,54 @@ async function runRefreshFlow(
 }
 
 /**
- * Main authentication function
- * Strategy:
- * - If session token is valid: use it directly (fastest path)
- * - If session token is invalid/expired: refresh to get new tokens
- *
- * Note: The session join to Mojang only requires accessToken and profile UUID.
- * The Xbox Live userHash is NOT needed for Minecraft Java authentication.
+ * Main authentication function.
+ * Uses direct (non-proxied) connections for auth APIs to avoid flagging proxy IPs.
+ * Token validation results are cached for 5 minutes to reduce API calls.
  */
 export async function authenticateWithToken(
   account: MicrosoftTokenAccount,
-  proxy?: SocksProxyConfig
+  _proxy?: SocksProxyConfig
 ): Promise<AuthResult> {
-  // Create a fetch function that routes through the proxy if provided
-  const fetchFn = createFetchFn(proxy);
-  if (proxy) {
-    logger.debug(`[authenticateWithToken] Using proxy ${proxy.type}://${proxy.host}:${proxy.port} for auth API calls`);
-  }
-
   try {
-    // First, try to validate the session token against the profile API
+    const cached = getCachedTokenValidity(account.accessToken);
+    if (cached?.valid && cached.profile) {
+      logger.debug(`[authenticateWithToken] Cache hit: ${cached.profile.name}`);
+      return {
+        success: true,
+        accessToken: account.accessToken,
+        refreshToken: account.refreshToken,
+        profile: cached.profile,
+        userHash: undefined,
+        refreshed: false,
+      };
+    }
+
     logger.debug('[authenticateWithToken] Validating session token...');
-    const validation = await validateTokenWithProfile(account.accessToken, fetchFn);
+    const validation = await validateTokenWithProfile(account.accessToken, globalThis.fetch);
 
     if (validation.valid && validation.profile) {
-      logger.debug(`[authenticateWithToken] Session token valid: ${validation.profile.name}`);
-
-      // Use session token directly - no need to refresh!
-      // The session join to Mojang only needs accessToken + profile UUID
+      logger.debug(`[authenticateWithToken] Token valid: ${validation.profile.name}`);
       return {
         success: true,
         accessToken: account.accessToken,
         refreshToken: account.refreshToken,
         profile: validation.profile,
-        userHash: undefined, // Not needed for Java edition auth
+        userHash: undefined,
         refreshed: false,
       };
     }
 
-    // Session token is invalid/expired/rejected - try refresh if we have a refresh token
     if (!account.refreshToken) {
-      logger.error(`[authenticateWithToken] Token validation failed (HTTP ${validation.statusCode}: ${validation.error}) and no refresh token available`);
+      logger.error(`[authenticateWithToken] Token invalid (${validation.statusCode}: ${validation.error}), no refresh token`);
       return {
         success: false,
-        error: `Access token invalid (${validation.error ?? 'unknown'}) and no refresh token available. Please re-authenticate the account.`,
+        error: `Token invalid and no refresh token. Re-authenticate the account.`,
       };
     }
 
-    logger.debug(`[authenticateWithToken] Token validation failed (HTTP ${validation.statusCode}), attempting refresh...`);
-    const result = await runRefreshFlow(account.refreshToken, fetchFn);
+    logger.debug(`[authenticateWithToken] Token invalid (${validation.statusCode}), refreshing...`);
+    const result = await runRefreshFlow(account.refreshToken);
 
-    // Report refreshed tokens back to coordinator if callback is set
     if (result.success && result.refreshed && globalTokenRefreshCallback && globalAccountId) {
       if (result.accessToken && result.refreshToken) {
         try {
@@ -123,9 +102,9 @@ export async function authenticateWithToken(
             accessToken: result.accessToken,
             refreshToken: result.refreshToken,
           });
-          logger.debug('[authenticateWithToken] Reported refreshed tokens to coordinator');
+          logger.debug('[authenticateWithToken] Reported refreshed tokens');
         } catch (err) {
-          logger.warn('[authenticateWithToken] Failed to report refreshed tokens:', err);
+          logger.warn('[authenticateWithToken] Failed to report tokens:', err);
         }
       }
     }
@@ -134,24 +113,16 @@ export async function authenticateWithToken(
   } catch (err) {
     return {
       success: false,
-      error: err instanceof Error ? err.message : 'Unknown authentication error',
+      error: err instanceof Error ? err.message : 'Auth failed',
     };
   }
 }
 
-/**
- * Get Minecraft profile using access token
- */
-export async function getMinecraftProfile(
-  accessToken: string
-): Promise<{ id: string; name: string } | null> {
+export async function getMinecraftProfile(accessToken: string): Promise<{ id: string; name: string } | null> {
   const result = await validateTokenWithProfile(accessToken);
   return result.profile ?? null;
 }
 
-/**
- * Validate a token account configuration
- */
 export function validateTokenAccount(account: MicrosoftTokenAccount): boolean {
   return (
     account.type === 'microsoft' &&

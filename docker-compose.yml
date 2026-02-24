@@ -53,6 +53,23 @@ services:
         max-file: "3"
     restart: unless-stopped
 
+  dashboard:
+    profiles:
+      - dashboard
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    depends_on:
+      - coordinator
+    ports:
+      - "${DASHBOARD_PORT:-8080}:80"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
   agent:
     build:
       context: .

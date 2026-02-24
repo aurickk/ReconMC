@@ -7,6 +7,8 @@ import {
   removeAgent,
 } from '../services/agentService.js';
 import { requireApiKey } from '../middleware/auth.js';
+import { scanQueue } from '../db/schema.js';
+import { eq } from 'drizzle-orm';
 
 export async function agentRoutes(fastify: FastifyInstance) {
   const db = createDb();
@@ -58,10 +60,34 @@ export async function agentRoutes(fastify: FastifyInstance) {
     }
   );
 
-  // List agents (protected - requires API key for external users to view status)
+  // List agents with current task address (protected - requires API key)
   fastify.get('/agents', { onRequest: requireApiKey }, async (_request, reply) => {
-    const list = await listOnlineAgents(db);
-    return reply.send(list);
+    const agents = await listOnlineAgents(db);
+    
+    // For each agent with a currentQueueId, look up the server address
+    const agentsWithTask = await Promise.all(
+      agents.map(async (agent) => {
+        if (agent.currentQueueId) {
+          try {
+            const [queueEntry] = await db
+              .select({ serverAddress: scanQueue.serverAddress })
+              .from(scanQueue)
+              .where(eq(scanQueue.id, agent.currentQueueId))
+              .limit(1);
+            
+            return {
+              ...agent,
+              taskAddress: queueEntry?.serverAddress || null,
+            };
+          } catch {
+            return { ...agent, taskAddress: null };
+          }
+        }
+        return { ...agent, taskAddress: null };
+      })
+    );
+    
+    return reply.send(agentsWithTask);
   });
 
   // Remove an agent (protected - requires API key)

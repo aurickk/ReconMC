@@ -35,5 +35,8 @@ references/
 # Temporary files
 *.tmp
 *.temp
-docs/
 testing/
+
+# Skidding
+.planning/
+AGENTS.md

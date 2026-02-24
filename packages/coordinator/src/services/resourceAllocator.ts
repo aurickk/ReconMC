@@ -89,7 +89,7 @@ export async function allocateResourcesTx(tx: Transaction): Promise<AllocatedRes
   };
 }
 
-export async function allocateResources(db: Db, _agentId: string): Promise<AllocatedResources | null> {
+export async function allocateResources(db: Db): Promise<AllocatedResources | null> {
   return db.transaction((tx) => allocateResourcesTx(tx as Transaction));
 }
 

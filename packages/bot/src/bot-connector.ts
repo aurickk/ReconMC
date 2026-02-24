@@ -1,8 +1,8 @@
 /**
  * Bot connector with retry logic and spawn verification
- * Supports Microsoft token authentication via session-based auth
  */
 
+import * as crypto from 'node:crypto';
 import mineflayer from 'mineflayer';
 import { createProxiedConnect } from './proxy';
 import { getUsername, getAccountProfile, getAccountAuth } from './auth';
@@ -358,16 +358,8 @@ async function createBot(
   return bot;
 }
 
-/**
- * Generate a random password for cracked server auth
- */
 function generateAuthPassword(): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let password = '';
-  for (let i = 0; i < 16; i++) {
-    password += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return password;
+  return crypto.randomBytes(12).toString('base64url').slice(0, 16);
 }
 
 /**

@@ -1,0 +1,8 @@
+---
+import MainLayout from '@/layouts/MainLayout.astro';
+import QueuePage from '@/components/QueuePage.vue';
+---
+
+<MainLayout title="Scan Queue">
+  <QueuePage client:load />
+</MainLayout>

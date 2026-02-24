@@ -6,12 +6,14 @@ import {
   getServer,
   deleteServer,
   deleteScanHistory,
+  getQueueStatus,
   type AddToQueueResult,
 } from '../services/redisQueueService.js';
 import { eq, or, and, sql, gt, gte, lt, lte, desc, asc, like, ilike, inArray } from 'drizzle-orm';
-import { servers, scanQueue, taskLogs } from '../db/schema.js';
+import { servers, scanQueue, taskLogs, agents } from '../db/schema.js';
 import { getRedisClient, safeRedisCommand, REDIS_KEYS } from '../db/redis.js';
 import { requireApiKey } from '../middleware/auth.js';
+import { listOnlineAgents } from '../services/agentService.js';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -430,4 +432,70 @@ export async function serverRoutes(fastify: FastifyInstance) {
       }
     }
   );
+
+  /**
+   * GET /api/dashboard/stats
+   * Get dashboard statistics for the monitoring view (public)
+   * Returns: totalServers, pendingScans, processingScans, onlineAgents, recentServers
+   */
+  fastify.get('/dashboard/stats', async (_request, reply) => {
+    try {
+      const [totalServersResult, queueStatus, onlineAgentsList, recentServersResult] = await Promise.all([
+        db.select({ count: sql<number>`count(*)::int` }).from(servers),
+        getQueueStatus(db),
+        listOnlineAgents(db),
+        db
+          .select({
+            id: servers.id,
+            serverAddress: servers.serverAddress,
+            hostname: servers.hostname,
+            latestResult: servers.latestResult,
+            lastScannedAt: servers.lastScannedAt,
+            scanCount: servers.scanCount,
+          })
+          .from(servers)
+          .orderBy(desc(servers.lastScannedAt))
+          .limit(10),
+      ]);
+
+      const recentServers = recentServersResult.map((server) => {
+        const result = server.latestResult as { online?: boolean; accountType?: string } | null;
+        const isOnline = result?.online ?? false;
+        const accountType = result?.accountType;
+        
+        let status: 'online' | 'offline' | 'pending' = 'pending';
+        if (server.lastScannedAt) {
+          status = isOnline ? 'online' : 'offline';
+        }
+        
+        let mode: 'online' | 'cracked' | 'unknown' = 'unknown';
+        if (accountType === 'microsoft') {
+          mode = 'online';
+        } else if (accountType === 'cracked') {
+          mode = 'cracked';
+        }
+
+        return {
+          id: server.id,
+          address: server.hostname || server.serverAddress,
+          status,
+          mode,
+          lastScanned: server.lastScannedAt,
+          scanCount: server.scanCount,
+        };
+      });
+
+      return reply.send({
+        totalServers: totalServersResult[0]?.count ?? 0,
+        pendingScans: queueStatus.pending,
+        processingScans: queueStatus.processing,
+        onlineAgents: onlineAgentsList.length,
+        recentServers,
+        lastUpdated: new Date().toISOString(),
+      });
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.code(500).send({ error: 'Failed to get dashboard stats', message: String(err) });
+    }
+  });
 }

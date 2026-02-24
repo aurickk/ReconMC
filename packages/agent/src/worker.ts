@@ -6,6 +6,8 @@ import { setTokenRefreshCallback, clearTokenRefreshCallback } from '@reconmc/bot
 
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS ?? '5000', 10);
 const HEARTBEAT_INTERVAL_MS = 30_000;
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 2000;
 
 function getCoordinatorBase(): string {
   return COORDINATOR_URL.replace(/\/$/, '');
@@ -17,6 +19,29 @@ interface CoordinatorAccount {
   username?: string;
   accessToken?: string;
   refreshToken?: string;
+}
+
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  operation: string
+): Promise<Response | null> {
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (res.ok) return res;
+
+      const body = await res.text().catch(() => '');
+      logger.warn(`[Agent] ${operation} attempt ${attempt}/${MAX_RETRIES} failed: HTTP ${res.status} - ${body}`);
+    } catch (err) {
+      logger.warn(`[Agent] ${operation} attempt ${attempt}/${MAX_RETRIES} network error: ${err}`);
+    }
+
+    if (attempt < MAX_RETRIES) {
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
+    }
+  }
+  return null;
 }
 
 function buildAccount(account: CoordinatorAccount): { account: Account; accountId: string } {
@@ -88,66 +113,35 @@ async function claimTask(base: string): Promise<{
 }
 
 async function completeTask(base: string, queueId: string, result: unknown): Promise<void> {
-  const MAX_RETRIES = 3;
-  const RETRY_DELAY_MS = 2000;
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const res = await fetch(`${base}/api/queue/${queueId}/complete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ result }),
-      });
-
-      if (res.ok) return;
-
-      const body = await res.text().catch(() => '');
-      logger.warn(`[Agent] completeTask attempt ${attempt}/${MAX_RETRIES} failed: HTTP ${res.status} - ${body}`);
-    } catch (err) {
-      logger.warn(`[Agent] completeTask attempt ${attempt}/${MAX_RETRIES} network error: ${err}`);
-    }
-
-    if (attempt < MAX_RETRIES) {
-      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
-    }
+  const res = await fetchWithRetry(
+    `${base}/api/queue/${queueId}/complete`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ result }),
+    },
+    `completeTask(${queueId})`
+  );
+  if (!res) {
+    throw new Error(`Failed to complete task ${queueId} after ${MAX_RETRIES} attempts`);
   }
-
-  // All retries exhausted - throw so the catch block can call failTask
-  throw new Error(`Failed to complete task ${queueId} after ${MAX_RETRIES} attempts`);
 }
 
 async function failTask(base: string, queueId: string, errorMessage: string): Promise<void> {
-  const MAX_RETRIES = 3;
-  const RETRY_DELAY_MS = 2000;
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const res = await fetch(`${base}/api/queue/${queueId}/fail`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ errorMessage }),
-      });
-
-      if (res.ok) return;
-
-      const body = await res.text().catch(() => '');
-      logger.warn(`[Agent] failTask attempt ${attempt}/${MAX_RETRIES} failed: HTTP ${res.status} - ${body}`);
-    } catch (err) {
-      logger.warn(`[Agent] failTask attempt ${attempt}/${MAX_RETRIES} network error: ${err}`);
-    }
-
-    if (attempt < MAX_RETRIES) {
-      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
-    }
+  const res = await fetchWithRetry(
+    `${base}/api/queue/${queueId}/fail`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ errorMessage }),
+    },
+    `failTask(${queueId})`
+  );
+  if (!res) {
+    logger.error(`[Agent] CRITICAL: Failed to report task ${queueId} as failed after ${MAX_RETRIES} attempts. Task may be stuck in processing.`);
   }
-
-  // All retries exhausted - log critical error (can't do much else)
-  logger.error(`[Agent] CRITICAL: Failed to report task ${queueId} as failed after ${MAX_RETRIES} attempts. Task may be stuck in processing.`);
 }
 
-/**
- * Report refreshed tokens back to the coordinator
- */
 async function reportRefreshedTokens(base: string, accountId: string, tokens: {
   accessToken: string;
   refreshToken?: string;
@@ -159,7 +153,7 @@ async function reportRefreshedTokens(base: string, accountId: string, tokens: {
       body: JSON.stringify(tokens),
     });
     if (res.ok) {
-      logger.info(`[Agent] Reported refreshed tokens for account (UUID redacted)`);
+      logger.info(`[Agent] Reported refreshed tokens for account`);
     } else {
       logger.warn(`[Agent] Failed to report refreshed tokens: HTTP ${res.status}`);
     }

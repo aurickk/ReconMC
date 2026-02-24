@@ -1,7 +1,5 @@
 /**
- * @reconmc/scanner
- *
- * Minecraft server scanner with retry logic
+ * @reconmc/scanner - Minecraft server scanner with retry logic
  */
 
 export { MinecraftScanner, scanServer } from './scanner.js';

@@ -111,17 +111,28 @@ export function extractProfileFromSessionToken(token: string): { id: string; nam
 
 /**
  * Validate token against Minecraft profile API
- * Returns validation result with status code
+ * Uses cache to avoid repeated API calls for recently validated tokens.
  */
 export async function validateTokenWithProfile(
   accessToken: string,
-  fetchFn: typeof fetch = globalThis.fetch
+  fetchFn: typeof fetch = globalThis.fetch,
+  bypassCache = false
 ): Promise<ProfileValidationResult> {
+  if (!bypassCache) {
+    const cached = getCachedTokenValidity(accessToken);
+    if (cached) {
+      return {
+        valid: cached.valid,
+        statusCode: cached.valid ? 200 : 401,
+        profile: cached.profile,
+        error: cached.valid ? undefined : 'Token invalid (cached)',
+      };
+    }
+  }
+
   try {
     const response = await fetchFn(MC_PROFILE_URL, {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-      },
+      headers: { 'Authorization': `Bearer ${accessToken}` },
     });
 
     const statusCode = response.status;
@@ -131,6 +142,7 @@ export async function validateTokenWithProfile(
     }
 
     if (statusCode === 401 || statusCode === 403) {
+      setCachedTokenValidity(accessToken, false);
       return { valid: false, statusCode, error: 'Token invalid or expired' };
     }
 
@@ -141,14 +153,13 @@ export async function validateTokenWithProfile(
     const data = await response.json() as { id?: string; name?: string; error?: string };
 
     if (data.error || !data.id || !data.name) {
+      setCachedTokenValidity(accessToken, false);
       return { valid: false, statusCode, error: 'Invalid profile response' };
     }
 
-    return {
-      valid: true,
-      statusCode,
-      profile: { id: data.id, name: data.name },
-    };
+    const profile = { id: data.id, name: data.name };
+    setCachedTokenValidity(accessToken, true, profile);
+    return { valid: true, statusCode, profile };
   } catch (err) {
     return { valid: false, statusCode: 0, error: err instanceof Error ? err.message : 'Network error' };
   }
@@ -156,13 +167,51 @@ export async function validateTokenWithProfile(
 
 /**
  * LRU-style cache for the working clientId+scope combination per refresh token prefix.
- * Key: first 16 chars of refresh token (enough to identify the account).
- * Value: { clientId, scope } that last worked.
- * Entries auto-expire after 24h to handle token re-issues.
  */
 const comboCache = new Map<string, { clientId: string; scope: string; ts: number }>();
-const COMBO_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const COMBO_CACHE_TTL = 24 * 60 * 60 * 1000;
 const COMBO_CACHE_MAX = 500;
+
+/**
+ * Token validity cache - avoids repeated profile validation calls.
+ * Key: hash of access token. Value: { valid, profile, expiresAt }.
+ */
+const tokenValidityCache = new Map<string, { valid: boolean; profile?: { id: string; name: string }; expiresAt: number }>();
+const TOKEN_VALIDITY_TTL = 5 * 60 * 1000; // 5 minutes
+const TOKEN_CACHE_MAX = 1000;
+
+function hashToken(token: string): string {
+  let hash = 0;
+  for (let i = 0; i < token.length; i++) {
+    hash = ((hash << 5) - hash) + token.charCodeAt(i);
+    hash = hash & hash;
+  }
+  return hash.toString(16);
+}
+
+export function getCachedTokenValidity(accessToken: string): { valid: boolean; profile?: { id: string; name: string } } | null {
+  const key = hashToken(accessToken);
+  const entry = tokenValidityCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    tokenValidityCache.delete(key);
+    return null;
+  }
+  return { valid: entry.valid, profile: entry.profile };
+}
+
+export function setCachedTokenValidity(accessToken: string, valid: boolean, profile?: { id: string; name: string }): void {
+  const key = hashToken(accessToken);
+  if (tokenValidityCache.size >= TOKEN_CACHE_MAX && !tokenValidityCache.has(key)) {
+    const firstKey = tokenValidityCache.keys().next().value;
+    if (firstKey !== undefined) tokenValidityCache.delete(firstKey);
+  }
+  tokenValidityCache.set(key, { valid, profile, expiresAt: Date.now() + TOKEN_VALIDITY_TTL });
+}
+
+export function clearTokenValidityCache(): void {
+  tokenValidityCache.clear();
+}
 
 function getCacheKey(refreshToken: string): string {
   return refreshToken.slice(0, 16);
@@ -181,7 +230,6 @@ function getCachedCombo(refreshToken: string): { clientId: string; scope: string
 
 function setCachedCombo(refreshToken: string, clientId: string, scope: string): void {
   const key = getCacheKey(refreshToken);
-  // Evict oldest entry if cache is full
   if (comboCache.size >= COMBO_CACHE_MAX && !comboCache.has(key)) {
     const firstKey = comboCache.keys().next().value;
     if (firstKey !== undefined) comboCache.delete(firstKey);

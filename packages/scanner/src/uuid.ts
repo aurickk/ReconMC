@@ -177,29 +177,18 @@ async function verifyWithPlayerDB(uuid: string): Promise<UUIDVerifyResult> {
  * Verify a UUID with multiple API providers (with fallback)
  * Primary: Minetools API
  * Fallback: PlayerDB API
- * Returns: { result: 'valid' | 'invalid' | 'error', uuid?: string, name?: string }
  */
-async function verifyUUIDWithMinetools(uuid: string): Promise<UUIDVerifyResult> {
-  // Try Minetools first (primary provider)
+async function verifyUUIDWithFallback(uuid: string): Promise<UUIDVerifyResult> {
   try {
     const result = await verifyWithMinetools(uuid);
-    
-    // If we got a definitive result (valid or invalid), return it
-    if (result.result !== 'error') {
-      return result;
-    }
-    
-    // Minetools returned an error, try fallback
+    if (result.result !== 'error') return result;
     logger.debug(`[UUID Validation] Minetools failed, trying PlayerDB fallback for UUID ${uuid}`);
   } catch (error) {
     logger.warn(`[UUID Validation] Minetools exception for UUID ${uuid}:`, error);
-    // Fall through to try PlayerDB
   }
 
-  // Try PlayerDB as fallback
   try {
-    const result = await verifyWithPlayerDB(uuid);
-    return result;
+    return await verifyWithPlayerDB(uuid);
   } catch (error) {
     logger.warn(`[UUID Validation] PlayerDB exception for UUID ${uuid}:`, error);
     return { result: 'error', uuid };
@@ -218,7 +207,7 @@ export async function isValidMinecraftUUID(uuid: string): Promise<boolean> {
   }
 
   // Then verify with Minetools API (uses cached Mojang data)
-  const result = await verifyUUIDWithMinetools(uuid);
+  const result = await verifyUUIDWithFallback(uuid);
   return result.result === 'valid'; // Return false for both invalid and API errors
 }
 
@@ -285,7 +274,7 @@ export async function detectServerMode(players: Array<ServerPlayer | Partial<Ser
   // Check all players' UUIDs with Mojang API
   const validationPromises = players.map(async (p) => {
     if (!p?.id) return { player: p, result: { result: 'error' as const, uuid: p?.id || '' } };
-    const result = await verifyUUIDWithMinetools(p.id);
+    const result = await verifyUUIDWithFallback(p.id);
     return { player: p, result };
   });
 

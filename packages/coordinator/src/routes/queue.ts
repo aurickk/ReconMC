@@ -7,8 +7,9 @@ import {
   getQueueStatus,
   getQueueEntries,
 } from '../services/redisQueueService.js';
-import { sql, eq, and, lt } from 'drizzle-orm';
+import { sql, eq, and, lt, inArray } from 'drizzle-orm';
 import { proxies, accounts, agents, scanQueue } from '../db/schema.js';
+import { requireApiKey } from '../middleware/auth.js';
 
 export async function queueRoutes(fastify: FastifyInstance) {
   const db = createDb();
@@ -215,6 +216,54 @@ export async function queueRoutes(fastify: FastifyInstance) {
       } catch (err) {
         fastify.log.error(err);
         return reply.code(500).send({ error: 'Failed to fail scan', message: String(err) });
+      }
+    }
+  );
+
+  /**
+   * DELETE /api/queue/:id
+   * Cancel a pending or processing scan
+   * Protected - requires API key
+   */
+  fastify.delete<{ Params: { id: string } }>(
+    '/queue/:id',
+    { onRequest: requireApiKey },
+    async (request, reply) => {
+      const { id } = request.params;
+
+      try {
+        // Check if the queue entry exists
+        const [entry] = await db
+          .select()
+          .from(scanQueue)
+          .where(eq(scanQueue.id, id))
+          .limit(1);
+
+        if (!entry) {
+          return reply.code(404).send({ error: 'Queue entry not found' });
+        }
+
+        // Only allow canceling pending or processing items
+        if (entry.status !== 'pending' && entry.status !== 'processing') {
+          return reply.code(400).send({ error: 'Can only cancel pending or processing scans' });
+        }
+
+        // Delete the queue entry
+        await db.delete(scanQueue).where(eq(scanQueue.id, id));
+
+        // If it was processing, we should also free up the agent
+        if (entry.status === 'processing' && entry.assignedAgentId) {
+          // Reset agent status to idle
+          await db
+            .update(agents)
+            .set({ status: 'idle', currentQueueId: null })
+            .where(eq(agents.id, entry.assignedAgentId));
+        }
+
+        return reply.code(204).send();
+      } catch (err) {
+        fastify.log.error(err);
+        return reply.code(500).send({ error: 'Failed to cancel scan', message: String(err) });
       }
     }
   );
