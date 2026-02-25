@@ -6,15 +6,17 @@ import {
   listOnlineAgents,
   removeAgent,
 } from '../services/agentService.js';
-import { requireApiKey } from '../middleware/auth.js';
+import { requireApiKey, requireTrustedNetwork } from '../middleware/auth.js';
 import { scanQueue } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 
 export async function agentRoutes(fastify: FastifyInstance) {
   const db = createDb();
 
-  // Agent registration (public - agents are in same Docker network)
-  fastify.post<{ Body: { agentId: string; name?: string } }>('/agents/register', async (request, reply) => {
+  fastify.post<{ Body: { agentId: string; name?: string } }>(
+    '/agents/register',
+    { onRequest: requireTrustedNetwork },
+    async (request, reply) => {
     const agentId = request.body?.agentId;
     if (!agentId || typeof agentId !== 'string') {
       return reply.code(400).send({ error: 'agentId is required' });
@@ -32,9 +34,9 @@ export async function agentRoutes(fastify: FastifyInstance) {
     }
   });
 
-  // Agent heartbeat (public - agents are in same Docker network)
   fastify.post<{ Body: { agentId: string; status?: string; currentQueueId?: string } }>(
     '/agents/heartbeat',
+    { onRequest: requireTrustedNetwork },
     async (request, reply) => {
       const agentId = request.body?.agentId;
       if (!agentId || typeof agentId !== 'string') {

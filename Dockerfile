@@ -10,16 +10,11 @@ COPY packages/scanner/package.json ./packages/scanner/
 COPY packages/bot/package.json ./packages/bot/
 COPY packages/coordinator/package.json ./packages/coordinator/
 COPY packages/agent/package.json ./packages/agent/
-COPY packages/dashboard/package.json ./packages/dashboard/
 COPY tsconfig*.json ./
 
 COPY packages ./packages/
 # Use npm install for workspaces (npm ci doesn't support workspace:* protocol)
 RUN npm install
-RUN npm run build
-
-# Build dashboard
-WORKDIR /app/packages/dashboard
 RUN npm run build
 
 # Stage 2: Runtime (smaller image, production deps only)
@@ -40,9 +35,6 @@ COPY --from=builder /app/packages/scanner/dist ./packages/scanner/dist
 COPY --from=builder /app/packages/bot/dist ./packages/bot/dist
 COPY --from=builder /app/packages/coordinator/dist ./packages/coordinator/dist
 COPY --from=builder /app/packages/agent/dist ./packages/agent/dist
-
-# Copy dashboard dist (served by coordinator)
-COPY --from=builder /app/packages/dashboard/dist ./packages/dashboard/dist
 
 # Copy database migrations
 COPY --from=builder /app/packages/coordinator/drizzle ./packages/coordinator/drizzle

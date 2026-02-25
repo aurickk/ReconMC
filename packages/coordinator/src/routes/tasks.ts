@@ -3,7 +3,7 @@ import { createDb } from '../db/index.js';
 import { eq, desc, inArray } from 'drizzle-orm';
 import { scanQueue, taskLogs, agents } from '../db/schema.js';
 import type { NewTaskLog } from '../db/schema.js';
-import { requireApiKey } from '../middleware/auth.js';
+import { requireApiKey, requireTrustedNetwork } from '../middleware/auth.js';
 
 /**
  * Maximum log message length
@@ -60,7 +60,7 @@ export async function taskRoutes(fastify: FastifyInstance) {
   fastify.post<{
     Params: { id: string };
     Body: { agentId: string; logs: Array<{ level: string; message: string }> };
-  }>('/tasks/:id/logs', async (request, reply) => {
+  }>('/tasks/:id/logs', { onRequest: requireTrustedNetwork }, async (request, reply) => {
     const { id } = request.params;
     const { agentId, logs } = request.body ?? {};
 

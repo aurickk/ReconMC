@@ -1,6 +1,5 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import fastifyStatic from '@fastify/static';
 import compress from '@fastify/compress';
 import { runMigrations } from './db/migrate.js';
 import { taskRoutes } from './routes/tasks.js';
@@ -14,12 +13,6 @@ import { requireApiKey, isAuthDisabled } from './middleware/auth.js';
 import { isRedisAvailable, closeRedis } from './db/redis.js';
 import { createDb, closeDb } from './db/index.js';
 import { startStuckTaskRecovery } from './services/redisQueueService.js';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { existsSync } from 'fs';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 function getCorsOrigin(allowedOrigins: string[] | undefined) {
   if (allowedOrigins?.length) {
@@ -91,27 +84,10 @@ export async function createCoordinatorServer(allowedOrigins?: string[]) {
     await fastify.register(proxyRoutes, { prefix: '/api' });
   });
 
-  // Serve dashboard static files from dashboard/dist
-  const dashboardDist = path.join(__dirname, '../../dashboard/dist');
-  if (existsSync(dashboardDist)) {
-    await fastify.register(fastifyStatic, {
-      root: dashboardDist,
-      prefix: '/',
-      wildcard: false,
-    });
-
-    // Serve index.html for all non-API routes (SPA support)
-    fastify.setNotFoundHandler((request, reply) => {
-      if (!request.url.startsWith('/api')) {
-        return reply.sendFile('index.html');
-      }
-      reply.code(404).send({ error: 'Not Found', message: 'Route not found' });
-    });
-
-    logger.info(`Dashboard static files served from ${dashboardDist}`);
-  } else {
-    logger.warn('Dashboard dist folder not found, serving API only');
-  }
+  // 404 handler for unknown API routes
+  fastify.setNotFoundHandler((request, reply) => {
+    reply.code(404).send({ error: 'Not Found', message: 'Route not found' });
+  });
 
   // Sanitize error messages - don't expose raw errors in production
   fastify.setErrorHandler((error, _request, reply) => {

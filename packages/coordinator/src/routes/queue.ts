@@ -9,16 +9,12 @@ import {
 } from '../services/redisQueueService.js';
 import { sql, eq, and, lt, inArray } from 'drizzle-orm';
 import { proxies, accounts, agents, scanQueue } from '../db/schema.js';
-import { requireApiKey } from '../middleware/auth.js';
+import { requireApiKey, requireTrustedNetwork } from '../middleware/auth.js';
 
 export async function queueRoutes(fastify: FastifyInstance) {
   const db = createDb();
 
-  /**
-   * GET /api/queue
-   * Get queue status (pending/processing counts)
-   */
-  fastify.get('/queue', async (_request, reply) => {
+  fastify.get('/queue', { onRequest: requireApiKey }, async (_request, reply) => {
     try {
       const status = await getQueueStatus(db);
       return reply.send(status);
@@ -28,12 +24,7 @@ export async function queueRoutes(fastify: FastifyInstance) {
     }
   });
 
-  /**
-   * GET /api/queue/diagnostics
-   * Get diagnostic information about why agents might be idle
-   * This helps identify resource allocation issues
-   */
-  fastify.get('/queue/diagnostics', async (_request, reply) => {
+  fastify.get('/queue/diagnostics', { onRequest: requireApiKey }, async (_request, reply) => {
     try {
       // Check proxy availability
       const proxyStats = await db
@@ -132,6 +123,7 @@ export async function queueRoutes(fastify: FastifyInstance) {
    */
   fastify.get<{ Querystring: { status?: string; limit?: string; offset?: string } }>(
     '/queue/entries',
+    { onRequest: requireApiKey },
     async (request, reply) => {
       const { status = 'all', limit = '100', offset = '0' } = request.query;
       const validStatuses = ['pending', 'processing', 'completed', 'failed', 'all'];
@@ -154,13 +146,9 @@ export async function queueRoutes(fastify: FastifyInstance) {
     }
   );
 
-  /**
-   * POST /api/queue/claim
-   * Agent claims next server from queue
-   * Replaces /api/tasks/claim
-   */
   fastify.post<{ Body: { agentId: string } }>(
     '/queue/claim',
+    { onRequest: requireTrustedNetwork },
     async (request, reply) => {
       const { agentId } = request.body ?? {};
       if (!agentId || typeof agentId !== 'string') {
@@ -180,13 +168,9 @@ export async function queueRoutes(fastify: FastifyInstance) {
     }
   );
 
-  /**
-   * POST /api/queue/:id/complete
-   * Complete a scan, update history, remove from queue
-   * Replaces /api/tasks/:id/complete
-   */
   fastify.post<{ Params: { id: string }; Body: { result?: unknown } }>(
     '/queue/:id/complete',
+    { onRequest: requireTrustedNetwork },
     async (request, reply) => {
       const { result } = request.body ?? {};
 
@@ -200,13 +184,9 @@ export async function queueRoutes(fastify: FastifyInstance) {
     }
   );
 
-  /**
-   * POST /api/queue/:id/fail
-   * Fail a scan, remove from queue with cleanup
-   * Replaces /api/tasks/:id/fail
-   */
   fastify.post<{ Params: { id: string }; Body: { errorMessage?: string } }>(
     '/queue/:id/fail',
+    { onRequest: requireTrustedNetwork },
     async (request, reply) => {
       const { errorMessage = 'Scan failed' } = request.body ?? {};
 
@@ -220,11 +200,6 @@ export async function queueRoutes(fastify: FastifyInstance) {
     }
   );
 
-  /**
-   * DELETE /api/queue/:id
-   * Cancel a pending or processing scan
-   * Protected - requires API key
-   */
   fastify.delete<{ Params: { id: string } }>(
     '/queue/:id',
     { onRequest: requireApiKey },

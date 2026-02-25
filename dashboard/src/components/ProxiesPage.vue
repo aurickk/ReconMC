@@ -44,6 +44,7 @@ import {
 } from '@/components/ui/select';
 import { api } from '@/lib/api';
 import type { Proxy } from '@/lib/types';
+import { formatRelativeTime } from '@/lib/utils';
 import { Plus, Pencil, Trash2, Download, Upload, Shield, Loader2 } from 'lucide-vue-next';
 
 const proxies = ref<Proxy[]>([]);
@@ -217,11 +218,6 @@ async function doExport() {
   }
 }
 
-function formatDate(date: string | null): string {
-  if (!date) return '—';
-  return new Date(date).toLocaleDateString();
-}
-
 onMounted(fetchProxies);
 </script>
 
@@ -352,7 +348,7 @@ onMounted(fetchProxies);
                 </Badge>
               </TableCell>
               <TableCell>{{ proxy.currentUsage }} / {{ proxy.maxConcurrent }}</TableCell>
-              <TableCell class="text-muted-foreground">{{ formatDate(proxy.lastUsedAt) }}</TableCell>
+              <TableCell class="text-muted-foreground">{{ formatRelativeTime(proxy.lastUsedAt) }}</TableCell>
               <TableCell class="text-right">
                 <div class="flex justify-end gap-1">
                   <Button variant="ghost" size="icon" @click="openEditDialog(proxy)">

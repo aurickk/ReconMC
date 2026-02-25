@@ -23,6 +23,7 @@ import {
 } from '@/components/ui/collapsible';
 import { api } from '@/lib/api';
 import type { ServerDetail, ScanHistoryEntry } from '@/lib/types';
+import { formatRelativeTime, formatDateTime, formatDuration } from '@/lib/utils';
 import { toast } from 'vue-sonner';
 import { 
   ArrowLeft, 
@@ -97,35 +98,6 @@ onMounted(() => {
 
 function selectScan(index: number) {
   selectedScanIndex.value = index;
-}
-
-function formatTimestamp(timestamp: string): string {
-  const date = new Date(timestamp);
-  return date.toLocaleString();
-}
-
-function formatRelativeTime(timestamp: string): string {
-  const date = new Date(timestamp);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-  
-  if (diffMins < 1) return 'Just now';
-  if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  if (diffDays < 7) return `${diffDays}d ago`;
-  return date.toLocaleDateString();
-}
-
-function formatDuration(ms: number | null | undefined): string {
-  if (!ms) return '—';
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  return `${mins}m ${secs}s`;
 }
 
 function getStatusBadge(scan: ScanHistoryEntry): { class: string; label: string } {

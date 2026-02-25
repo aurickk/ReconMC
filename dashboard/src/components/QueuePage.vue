@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/dialog';
 import { api } from '@/lib/api';
 import type { QueueEntry } from '@/lib/types';
+import { formatRelativeTime, formatDateTime } from '@/lib/utils';
 import { ChevronLeft, ChevronRight, Loader2, Plus, X } from 'lucide-vue-next';
 
 const entries = ref<QueueEntry[]>([]);
@@ -70,26 +71,6 @@ async function fetchData(isInitial = false) {
   if (isInitial) {
     loading.value = false;
   }
-}
-
-function formatTimestamp(timestamp: string | null): string {
-  if (!timestamp) return '—';
-  const date = new Date(timestamp);
-  return date.toLocaleString();
-}
-
-function formatTimeAgo(timestamp: string | null): string {
-  if (!timestamp) return '—';
-  const date = new Date(timestamp);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-
-  if (diffMins < 1) return 'Just now';
-  if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  return date.toLocaleDateString();
 }
 
 function getStatusBadgeClass(status: string): string {
@@ -300,10 +281,10 @@ onUnmounted(() => {
                 {{ entry.assignedAgentId ? entry.assignedAgentId.slice(0, 8) : '—' }}
               </TableCell>
               <TableCell class="text-muted-foreground">
-                {{ formatTimeAgo(entry.createdAt) }}
+                {{ formatRelativeTime(entry.createdAt, '—') }}
               </TableCell>
               <TableCell class="text-muted-foreground">
-                {{ entry.startedAt ? formatTimeAgo(entry.startedAt) : '—' }}
+                {{ formatRelativeTime(entry.startedAt, '—') }}
               </TableCell>
               <TableCell class="text-right">
                 <Button

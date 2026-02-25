@@ -37,6 +37,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { api } from '@/lib/api';
 import type { Account } from '@/lib/types';
+import { formatRelativeTime } from '@/lib/utils';
 import { Plus, Pencil, Trash2, Download, Upload, RefreshCw, User, Loader2 } from 'lucide-vue-next';
 
 const accounts = ref<Account[]>([]);
@@ -250,11 +251,6 @@ function getStatusBadge(account: Account): { class: string; label: string } {
   return { class: 'bg-green-500/10 text-green-600 border-green-500/20', label: 'Valid' };
 }
 
-function formatDate(date: string | null): string {
-  if (!date) return '—';
-  return new Date(date).toLocaleDateString();
-}
-
 onMounted(fetchAccounts);
 </script>
 
@@ -351,7 +347,7 @@ onMounted(fetchAccounts);
                 </Badge>
               </TableCell>
               <TableCell>{{ account.currentUsage }} / {{ account.maxConcurrent }}</TableCell>
-              <TableCell class="text-muted-foreground">{{ formatDate(account.lastValidatedAt) }}</TableCell>
+              <TableCell class="text-muted-foreground">{{ formatRelativeTime(account.lastValidatedAt) }}</TableCell>
               <TableCell class="text-right">
                 <div class="flex justify-end gap-1">
                   <Button variant="ghost" size="icon" @click="validateAccount(account)" :disabled="validatingId === account.id" title="Re-validate">

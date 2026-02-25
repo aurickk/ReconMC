@@ -27,6 +27,7 @@ export async function serverRoutes(fastify: FastifyInstance) {
    */
   fastify.post<{ Body: { servers: string[] } }>(
     '/servers/add',
+    { onRequest: requireApiKey },
     async (request, reply) => {
       const { servers: serverList } = request.body ?? {};
       if (!Array.isArray(serverList) || serverList.length === 0) {
@@ -50,6 +51,7 @@ export async function serverRoutes(fastify: FastifyInstance) {
    */
   fastify.get<{ Querystring: { limit?: string; offset?: string } }>(
     '/servers',
+    { onRequest: requireApiKey },
     async (request, reply) => {
       const limit = request.query.limit ? parseInt(request.query.limit, 10) : 100;
       const offset = request.query.offset ? parseInt(request.query.offset, 10) : 0;
@@ -102,6 +104,7 @@ export async function serverRoutes(fastify: FastifyInstance) {
 
   fastify.get<{ Querystring: SearchQuerystring }>(
     '/servers/search',
+    { onRequest: requireApiKey },
     async (request, reply) => {
       const {
         limit = '100',
@@ -275,6 +278,7 @@ export async function serverRoutes(fastify: FastifyInstance) {
    */
   fastify.get<{ Params: { address: string } }>(
     '/servers/by-address/:address',
+    { onRequest: requireApiKey },
     async (request, reply) => {
       try {
         const address = request.params.address;
@@ -332,6 +336,7 @@ export async function serverRoutes(fastify: FastifyInstance) {
    */
   fastify.get<{ Params: { id: string } }>(
     '/servers/:id',
+    { onRequest: requireApiKey },
     async (request, reply) => {
       if (!request.params.id || !UUID_REGEX.test(request.params.id)) {
         return reply.code(400).send({ error: 'Invalid server ID format' });
@@ -433,12 +438,7 @@ export async function serverRoutes(fastify: FastifyInstance) {
     }
   );
 
-  /**
-   * GET /api/dashboard/stats
-   * Get dashboard statistics for the monitoring view (public)
-   * Returns: totalServers, pendingScans, processingScans, onlineAgents, recentServers
-   */
-  fastify.get('/dashboard/stats', async (_request, reply) => {
+  fastify.get('/dashboard/stats', { onRequest: requireApiKey }, async (_request, reply) => {
     try {
       const [totalServersResult, queueStatus, onlineAgentsList, recentServersResult] = await Promise.all([
         db.select({ count: sql<number>`count(*)::int` }).from(servers),

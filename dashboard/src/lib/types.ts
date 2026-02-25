@@ -24,6 +24,7 @@ export interface Server {
   latestResult: ServerScanResult | null;
   firstSeenAt: string | null;
   lastScannedAt: string | null;
+  scanCount?: number;
 }
 
 export interface ServerScanResult {
@@ -37,6 +38,12 @@ export interface ServerScanResult {
   plugins: Array<{ name: string; version: string }> | null;
   geo: { country: string; countryCode: string } | null;
   accountType: string | null;
+  players?: Array<{ name: string; id: string }>;
+  connection?: {
+    username?: string;
+    uuid?: string;
+    accountType?: string;
+  };
 }
 
 export interface Agent {

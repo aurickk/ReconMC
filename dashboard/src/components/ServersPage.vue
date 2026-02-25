@@ -25,6 +25,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { api } from '@/lib/api';
 import type { Server } from '@/lib/types';
+import { formatRelativeTime } from '@/lib/utils';
 import { toast } from 'vue-sonner';
 import { RefreshCw, Trash2, ChevronLeft, ChevronRight, ExternalLink } from 'lucide-vue-next';
 
@@ -96,22 +97,6 @@ async function handleDelete() {
 function openDeleteDialog(id: string) {
   deleteServerId.value = id;
   deleteDialogOpen.value = true;
-}
-
-function formatLastScanned(timestamp: string | null): string {
-  if (!timestamp) return 'Never';
-  const date = new Date(timestamp);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-
-  if (diffMins < 1) return 'Just now';
-  if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  if (diffDays < 7) return `${diffDays}d ago`;
-  return date.toLocaleDateString();
 }
 
 function getStatusBadgeClass(server: Server): string {
@@ -241,7 +226,7 @@ onUnmounted(() => {
                   {{ getModeLabel(server) }}
                 </Badge>
               </TableCell>
-              <TableCell>{{ formatLastScanned(server.lastScannedAt) }}</TableCell>
+              <TableCell>{{ formatRelativeTime(server.lastScannedAt) }}</TableCell>
               <TableCell class="text-right">{{ server.scanCount ?? 0 }}</TableCell>
               <TableCell class="text-right">
                 <div class="flex justify-end gap-1">

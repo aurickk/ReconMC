@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/table';
 import { api } from '@/lib/api';
 import type { Agent } from '@/lib/types';
+import { formatRelativeTime } from '@/lib/utils';
 import { Activity, Clock, Server, Zap } from 'lucide-vue-next';
 
 const agents = ref<Agent[]>([]);
@@ -46,49 +47,6 @@ function getStatusBadge(status: string): { class: string; label: string } {
       return { class: 'bg-gray-500/10 text-gray-600 border-gray-500/20', label: status };
   }
 }
-
-function formatLastSeen(timestamp: string | null): string {
-  if (!timestamp) return 'Never';
-  const date = new Date(timestamp);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffSecs = Math.floor(diffMs / 1000);
-  const diffMins = Math.floor(diffSecs / 60);
-  const diffHours = Math.floor(diffMins / 60);
-  
-  if (diffSecs < 60) return `${diffSecs}s ago`;
-  if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  return date.toLocaleDateString();
-}
-
-function isOnline(timestamp: string | null): boolean {
-  if (!timestamp) return false;
-  const date = new Date(timestamp);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  return diffMs < 5 * 60 * 1000;
-}
-
-const sortedAgents = computed(() => {
-  return [...agents.value].sort((a, b) => {
-    const aOnline = isOnline(a.lastSeenAt);
-    const bOnline = isOnline(b.lastSeenAt);
-    if (aOnline && !bOnline) return -1;
-    if (!aOnline && bOnline) return 1;
-    
-    const aTime = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
-    const bTime = b.lastSeenAt ? new Date(b.lastSeenAt).getTime() : 0;
-    return bTime - aTime;
-  });
-});
-
-const stats = computed(() => {
-  const total = agents.value.length;
-  const online = agents.value.filter(a => isOnline(a.lastSeenAt)).length;
-  const scanning = agents.value.filter(a => a.status?.toLowerCase() === 'scanning' || a.status?.toLowerCase() === 'busy').length;
-  return { total, online, scanning };
-});
 
 onMounted(() => {
   fetchData();
@@ -185,7 +143,7 @@ onUnmounted(() => {
               <TableCell>
                 <div class="flex items-center gap-1">
                   <Clock class="h-3 w-3 text-muted-foreground" />
-                  {{ formatLastSeen(agent.lastSeenAt) }}
+                  {{ formatRelativeTime(agent.lastSeenAt) }}
                 </div>
               </TableCell>
             </TableRow>
