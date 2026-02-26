@@ -1,0 +1,25 @@
+# SQLite database files
+data/
+
+# Build output
+dist/
+
+# Node modules
+node_modules/
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -17,8 +17,9 @@
   ],
   "dependencies": {
     "@reconmc/scanner": "*",
-    "minecraft-protocol": "^1.63.0",
-    "mineflayer": "^4.34.0",
+    "drizzle-kit": "0.31.9",
+    "minecraft-protocol": "^1.26.5",
+    "mineflayer": "^4.0.0",
     "socks": "^2.8.7"
   },
   "devDependencies": {

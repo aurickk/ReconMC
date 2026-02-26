@@ -28,6 +28,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@tarquinen/opencode-smart-title": "^0.1.7",
     "zod": "^4.3.6"
   }
 }
