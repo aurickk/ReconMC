@@ -3,7 +3,7 @@ import type { Db } from '../db/index.js';
 import { scanQueue, servers, agents, taskLogs } from '../db/schema.js';
 import type { NewScanQueue, ScanQueue } from '../db/schema.js';
 import { resolveServerIp, PrivateIpError, parseServerAddress } from './ipResolver.js';
-import { allocateResourcesTx, releaseResourcesTx, type Transaction } from './resourceAllocator.js';
+import { allocateResourcesTx, releaseResourcesTx, reconcileResourceUsage, type Transaction } from './resourceAllocator.js';
 import {
   getRedisClient,
   safeRedisCommand,
@@ -33,12 +33,10 @@ export interface ClaimedQueueItem {
     username?: string;
     password?: string;
   };
-  account: {
+  session: {
     id: string;
-    type: string;
     username?: string;
     accessToken?: string;
-    refreshToken?: string;
   };
 }
 
@@ -396,7 +394,7 @@ async function claimFromQueueRedis(
           status: 'processing',
           assignedAgentId: agentId,
           assignedProxyId: resources.proxy.id,
-          assignedAccountId: resources.account.id,
+          assignedSessionId: resources.session.id,
           startedAt: new Date(),
         })
         .where(eq(scanQueue.id, itemData.id));
@@ -420,12 +418,10 @@ async function claimFromQueueRedis(
           username: resources.proxy.username ?? undefined,
           password: resources.proxy.password ?? undefined,
         },
-        account: {
-          id: resources.account.id,
-          type: resources.account.type,
-          username: resources.account.username ?? undefined,
-          accessToken: resources.account.accessToken ?? undefined,
-          refreshToken: resources.account.refreshToken ?? undefined,
+        session: {
+          id: resources.session.id,
+          username: resources.session.username ?? undefined,
+          accessToken: resources.session.accessToken ?? undefined,
         },
       };
     });
@@ -469,7 +465,7 @@ async function claimFromQueuePostgres(db: Db, agentId: string): Promise<ClaimedQ
         status: 'processing',
         assignedAgentId: agentId,
         assignedProxyId: resources.proxy.id,
-        assignedAccountId: resources.account.id,
+        assignedSessionId: resources.session.id,
         startedAt: new Date(),
       })
       .where(eq(scanQueue.id, item.id));
@@ -493,12 +489,10 @@ async function claimFromQueuePostgres(db: Db, agentId: string): Promise<ClaimedQ
         username: resources.proxy.username ?? undefined,
         password: resources.proxy.password ?? undefined,
       },
-      account: {
-        id: resources.account.id,
-        type: resources.account.type,
-        username: resources.account.username ?? undefined,
-        accessToken: resources.account.accessToken ?? undefined,
-        refreshToken: resources.account.refreshToken ?? undefined,
+      session: {
+        id: resources.session.id,
+        username: resources.session.username ?? undefined,
+        accessToken: resources.session.accessToken ?? undefined,
       },
     };
   });
@@ -642,6 +636,81 @@ export async function getQueueEntries(db: Db, options: QueueEntryOptions = {}): 
 }
 
 /**
+ * Extract MOTD text from Minecraft description (string or chat component)
+ */
+function extractMotd(description: unknown): string | null {
+  if (!description) return null;
+  if (typeof description === 'string') return description;
+  if (typeof description === 'object' && description !== null) {
+    const desc = description as Record<string, unknown>;
+    let text = typeof desc.text === 'string' ? desc.text : '';
+    if (Array.isArray(desc.extra)) {
+      for (const part of desc.extra) {
+        if (typeof part === 'string') text += part;
+        else if (part && typeof part === 'object' && typeof (part as Record<string, unknown>).text === 'string') {
+          text += (part as Record<string, unknown>).text;
+        }
+      }
+    }
+    return text || null;
+  }
+  return null;
+}
+
+/**
+ * Transform agent FullScanResult into the flat ServerScanResult shape
+ * the dashboard expects (online, version, motd, playersOnline, etc.)
+ */
+function transformScanResult(raw: unknown): object | null {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const r = raw as Record<string, unknown>;
+  const ping = r.ping as Record<string, unknown> | undefined;
+  const conn = r.connection as Record<string, unknown> | undefined;
+
+  if (!ping) return null;
+
+  const status = ping.status as Record<string, unknown> | undefined;
+  const data = status?.data as Record<string, unknown> | undefined;
+  const version = data?.version as Record<string, unknown> | undefined;
+  const players = data?.players as Record<string, unknown> | undefined;
+  const location = ping.location as Record<string, unknown> | undefined;
+  const serverPlugins = conn?.serverPlugins as Record<string, unknown> | undefined;
+
+  return {
+    online: ping.success === true,
+    version: (version?.name as string) ?? null,
+    protocol: (version?.protocol as number) ?? null,
+    motd: extractMotd(data?.description),
+    playersOnline: (players?.online as number) ?? null,
+    playersMax: (players?.max as number) ?? null,
+    players: Array.isArray(players?.sample) ? players.sample : null,
+    icon: (data?.favicon as string) ?? null,
+    latency: (status?.latency as number) ?? null,
+    plugins: Array.isArray(serverPlugins?.plugins)
+      ? (serverPlugins.plugins as string[]).map((p: string) => ({ name: p, version: '' }))
+      : null,
+    geo: location ? {
+      country: (location.countryName as string) ?? null,
+      countryCode: (location.country as string) ?? null,
+      city: (location.city as string) ?? null,
+      isp: (location.isp as string) ?? null,
+    } : null,
+    accountType: (conn?.accountType as string) ?? null,
+    serverMode: (r.serverMode as string) ?? null,
+    connection: conn ? {
+      success: conn.success === true,
+      username: (conn.username as string) ?? undefined,
+      uuid: (conn.uuid as string) ?? undefined,
+      accountType: (conn.accountType as string) ?? undefined,
+      spawnPosition: conn.spawnPosition ?? undefined,
+      serverAuth: conn.serverAuth ?? undefined,
+      error: conn.error ?? undefined,
+    } : null,
+  };
+}
+
+/**
  * Complete a scan - update server history and remove from queue
  */
 export async function completeScan(
@@ -669,8 +738,8 @@ export async function completeScan(
     }
 
     // Release resources within the same transaction to prevent inconsistency
-    if (item.assignedProxyId && item.assignedAccountId) {
-      await releaseResourcesTx(tx as Transaction, item.assignedProxyId, item.assignedAccountId);
+    if (item.assignedProxyId && item.assignedSessionId) {
+      await releaseResourcesTx(tx as Transaction, item.assignedProxyId, item.assignedSessionId);
     }
 
     // Clear agent's currentQueueId and set status to idle
@@ -680,6 +749,9 @@ export async function completeScan(
         .set({ currentQueueId: null, status: 'idle' })
         .where(eq(agents.id, item.assignedAgentId));
     }
+
+    // Transform raw agent result into the flat shape the dashboard expects
+    const transformedResult = errorMessage ? null : transformScanResult(result);
 
     // Build scan history entry - use same timestamp for consistency
     const completedAt = new Date();
@@ -695,7 +767,7 @@ export async function completeScan(
 
     const historyEntry = {
       timestamp: completedAt.toISOString(),
-      result: errorMessage ? null : result,
+      result: transformedResult,
       errorMessage: errorMessage ?? undefined,
       duration: duration,
       logs: logs.map((log: { level: string; message: string; timestamp?: Date }) => ({
@@ -740,7 +812,7 @@ export async function completeScan(
         .set({
           lastScannedAt: completedAt,
           scanCount: sql`${servers.scanCount} + 1`,
-          latestResult: result ? (result as object) : null,
+          latestResult: transformedResult,
           scanHistory: updatedHistory as any,
           hostnames: newHostnames as any,
           // Only set primaryHostname if not already set
@@ -759,7 +831,7 @@ export async function completeScan(
         firstSeenAt: completedAt,
         lastScannedAt: completedAt,
         scanCount: 1,
-        latestResult: result ? (result as object) : null,
+        latestResult: transformedResult,
         scanHistory: [historyEntry] as any,
       });
     }
@@ -893,10 +965,13 @@ export async function recoverStuckTasks(db: Db): Promise<number> {
  */
 export function startStuckTaskRecovery(db: Db, intervalMs: number = 60_000): ReturnType<typeof setInterval> {
   logger.info(`[StuckTaskRecovery] Started (checking every ${intervalMs / 1000}s, timeout: ${STUCK_TASK_TIMEOUT_MS / 1000}s)`);
-  return setInterval(() => {
-    recoverStuckTasks(db).catch((err) => {
+  return setInterval(async () => {
+    try {
+      await recoverStuckTasks(db);
+      await reconcileResourceUsage(db);
+    } catch (err) {
       logger.error('[StuckTaskRecovery] Unhandled error:', err);
-    });
+    }
   }, intervalMs);
 }
 

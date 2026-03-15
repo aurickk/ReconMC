@@ -7,8 +7,8 @@ import {
   getQueueStatus,
   getQueueEntries,
 } from '../services/redisQueueService.js';
-import { sql, eq, and, lt, inArray } from 'drizzle-orm';
-import { proxies, accounts, agents, scanQueue } from '../db/schema.js';
+import { sql, eq, and } from 'drizzle-orm';
+import { proxies, sessions, agents, scanQueue } from '../db/schema.js';
 import { requireApiKey, requireTrustedNetwork } from '../middleware/auth.js';
 
 export async function queueRoutes(fastify: FastifyInstance) {
@@ -37,17 +37,16 @@ export async function queueRoutes(fastify: FastifyInstance) {
         })
         .from(proxies);
 
-      // Check account availability
-      const accountStats = await db
+      // Check session availability
+      const sessionStats = await db
         .select({
           total: sql<number>`count(*)::int`,
           active: sql<number>`count(*) FILTER (WHERE is_active = true)::int`,
-          valid: sql<number>`count(*) FILTER (WHERE is_active = true AND is_valid = true)::int`,
-          available: sql<number>`count(*) FILTER (WHERE is_active = true AND is_valid = true AND current_usage < max_concurrent)::int`,
-          totalCapacity: sql<number>`COALESCE(SUM(max_concurrent) FILTER (WHERE is_active = true AND is_valid = true), 0)::int`,
-          usedCapacity: sql<number>`COALESCE(SUM(current_usage) FILTER (WHERE is_active = true AND is_valid = true), 0)::int`,
+          available: sql<number>`count(*) FILTER (WHERE is_active = true AND current_usage < max_concurrent)::int`,
+          totalCapacity: sql<number>`COALESCE(SUM(max_concurrent) FILTER (WHERE is_active = true), 0)::int`,
+          usedCapacity: sql<number>`COALESCE(SUM(current_usage) FILTER (WHERE is_active = true), 0)::int`,
         })
-        .from(accounts);
+        .from(sessions);
 
       // Check agent status
       const agentStats = await db
@@ -84,12 +83,10 @@ export async function queueRoutes(fastify: FastifyInstance) {
         issues.push(`All proxies at capacity (${proxyStats[0]?.usedCapacity}/${proxyStats[0]?.totalCapacity} slots used) - add more proxies or increase max_concurrent`);
       }
 
-      if (accountStats[0]?.total === 0) {
-        issues.push('No accounts configured - add accounts to enable scanning');
-      } else if (accountStats[0]?.valid === 0) {
-        issues.push('No valid accounts - all accounts are marked as invalid');
-      } else if (accountStats[0]?.available === 0) {
-        issues.push(`All accounts at capacity (${accountStats[0]?.usedCapacity}/${accountStats[0]?.totalCapacity} slots used) - add more accounts or increase max_concurrent`);
+      if (sessionStats[0]?.total === 0) {
+        issues.push('No sessions configured - import session tokens to enable scanning');
+      } else if (sessionStats[0]?.available === 0) {
+        issues.push(`All sessions at capacity (${sessionStats[0]?.usedCapacity}/${sessionStats[0]?.totalCapacity} slots used) - import more session tokens or increase max_concurrent`);
       }
 
       if (agentStats[0]?.total === 0) {
@@ -104,7 +101,7 @@ export async function queueRoutes(fastify: FastifyInstance) {
 
       return reply.send({
         proxies: proxyStats[0],
-        accounts: accountStats[0],
+        sessions: sessionStats[0],
         agents: agentStats[0],
         queue: queueStats,
         stuckItems: stuckItems[0]?.count ?? 0,
@@ -223,16 +220,11 @@ export async function queueRoutes(fastify: FastifyInstance) {
           return reply.code(400).send({ error: 'Can only cancel pending or processing scans' });
         }
 
-        // Delete the queue entry
-        await db.delete(scanQueue).where(eq(scanQueue.id, id));
-
-        // If it was processing, we should also free up the agent
-        if (entry.status === 'processing' && entry.assignedAgentId) {
-          // Reset agent status to idle
-          await db
-            .update(agents)
-            .set({ status: 'idle', currentQueueId: null })
-            .where(eq(agents.id, entry.assignedAgentId));
+        // Use completeScan for processing items to properly release proxy/session resources
+        if (entry.status === 'processing') {
+          await failScan(db, id, 'Scan canceled by user');
+        } else {
+          await db.delete(scanQueue).where(eq(scanQueue.id, id));
         }
 
         return reply.code(204).send();

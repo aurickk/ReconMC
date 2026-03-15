@@ -5,7 +5,7 @@ import { runMigrations } from './db/migrate.js';
 import { taskRoutes } from './routes/tasks.js';
 import { serverRoutes } from './routes/servers.js';
 import { queueRoutes } from './routes/queue.js';
-import { accountRoutes } from './routes/accounts.js';
+import { sessionRoutes } from './routes/sessions.js';
 import { proxyRoutes } from './routes/proxies.js';
 import { agentRoutes } from './routes/agents.js';
 import { logger } from './logger.js';
@@ -13,6 +13,7 @@ import { requireApiKey, isAuthDisabled } from './middleware/auth.js';
 import { isRedisAvailable, closeRedis } from './db/redis.js';
 import { createDb, closeDb } from './db/index.js';
 import { startStuckTaskRecovery } from './services/redisQueueService.js';
+import { reconcileResourceUsage } from './services/resourceAllocator.js';
 
 function getCorsOrigin(allowedOrigins: string[] | undefined) {
   if (allowedOrigins?.length) {
@@ -80,7 +81,7 @@ export async function createCoordinatorServer(allowedOrigins?: string[]) {
   await fastify.register(async function (fastify) {
     fastify.addHook('onRequest', requireApiKey);
     await fastify.register(serverRoutes, { prefix: '/api' });
-    await fastify.register(accountRoutes, { prefix: '/api' });
+    await fastify.register(sessionRoutes, { prefix: '/api' });
     await fastify.register(proxyRoutes, { prefix: '/api' });
   });
 
@@ -112,8 +113,11 @@ export async function startCoordinatorServer(
   await server.listen({ port, host });
   logger.info(`Coordinator listening on http://${host}:${port}`);
 
-  // Start periodic recovery of tasks stuck in "processing" state
+  // Reconcile leaked resource counters on startup
   const db = createDb();
+  await reconcileResourceUsage(db);
+
+  // Start periodic recovery of tasks stuck in "processing" state
   const recoveryInterval = startStuckTaskRecovery(db);
 
   // Graceful shutdown: close connections and drain in-flight requests

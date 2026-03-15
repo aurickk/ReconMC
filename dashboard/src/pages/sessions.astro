@@ -1,0 +1,8 @@
+---
+import MainLayout from '@/layouts/MainLayout.astro';
+import SessionsPage from '@/components/SessionsPage.vue';
+---
+
+<MainLayout title="Sessions | ReconMC">
+  <SessionsPage client:only="vue" />
+</MainLayout>

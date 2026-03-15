@@ -521,30 +521,29 @@ export class MinecraftScanner {
     }, timeout);
 
     // Send handshake and status request immediately after connection
-    (async () => {
-      try {
-        const handshake = await packetGen.craftHandshake(
-          host,
-          port,
-          this.options.protocolVersion
-        );
+    try {
+      const handshake = packetGen.craftHandshake(
+        host,
+        port,
+        this.options.protocolVersion
+      );
 
-        const statusRequest = await packetGen.craftEmptyPacket(0);
+      const statusRequest = packetGen.craftEmptyPacket(0);
 
-        this.log(`Sending handshake packet (${handshake.length} bytes)`, Array.from(handshake).slice(0, 20));
-        this.log(`Sending status request packet (${statusRequest.length} bytes)`, Array.from(statusRequest));
+      this.log(`Sending handshake packet (${handshake.length} bytes)`, Array.from(handshake).slice(0, 20));
+      this.log(`Sending status request packet (${statusRequest.length} bytes)`, Array.from(statusRequest));
 
-        socket.write(handshake);
-        socket.write(statusRequest);
-      } catch (error) {
-        this.log(`Error sending packets:`, error);
-        clearTimeout(timeoutHandle);
-        socket.destroy();
-        reject(error);
-      }
-    })();
+      socket.write(handshake);
+      socket.write(statusRequest);
+    } catch (error) {
+      this.log(`Error sending packets:`, error);
+      clearTimeout(timeoutHandle);
+      socket.destroy();
+      reject(error);
+      return;
+    }
 
-    socket.on('data', async (chunk) => {
+    socket.on('data', (chunk) => {
       try {
         // Handle both Buffer and string chunk types
         let uint8Chunk: Uint8Array;
@@ -561,7 +560,7 @@ export class MinecraftScanner {
 
         this.log(`Received data chunk (${uint8Chunk.length} bytes)`, Array.from(uint8Chunk).slice(0, 20));
 
-        packet = await packetDec.packetPipeline(uint8Chunk, packet);
+        packet = packetDec.packetPipeline(uint8Chunk, packet);
 
         this.log(`Packet state after processing:`, {
           handshakeBaked: packet.status.handshakeBaked,
@@ -611,7 +610,7 @@ export class MinecraftScanner {
         // Send ping request if handshake is complete
         if (packet.status.handshakeBaked && !packet.status.pingSent && this.options.ping) {
           this.log(`Handshake complete, sending ping request`);
-          const pingRequest = await packetGen.craftPingPacket();
+          const pingRequest = packetGen.craftPingPacket();
           this.log(`Ping packet (${pingRequest.length} bytes)`, Array.from(pingRequest));
           packet.status.pingSentTime = Date.now();
           packet.status.pingSent = true;
@@ -659,7 +658,7 @@ export class MinecraftScanner {
         }
       );
 
-      socket.on('connect', async () => {
+      socket.on('connect', () => {
         this.log(`Socket connected to ${host}:${port}`);
         // Use the shared protocol handler
         this.runScanProtocol(socket, host, port, resolve, reject);

@@ -7,9 +7,9 @@ describe('Database Schema', () => {
     assert.ok(schema.proxies);
   });
 
-  it('exports accounts table', async () => {
+  it('exports sessions table', async () => {
     const schema = await import('../db/schema.js');
-    assert.ok(schema.accounts);
+    assert.ok(schema.sessions);
   });
 
   it('exports agents table', async () => {
@@ -38,13 +38,14 @@ describe('Database Schema', () => {
     assert.ok(proxies.currentUsage);
   });
 
-  it('accounts table has required columns', async () => {
-    const { accounts } = await import('../db/schema.js');
-    assert.ok(accounts.id);
-    assert.ok(accounts.type);
-    assert.ok(accounts.isActive);
-    assert.ok(accounts.isValid);
-    assert.ok(accounts.maxConcurrent);
-    assert.ok(accounts.currentUsage);
+  it('sessions table has required columns', async () => {
+    const { sessions } = await import('../db/schema.js');
+    assert.ok(sessions.id);
+    assert.ok(sessions.username);
+    assert.ok(sessions.accessToken);
+    assert.ok(sessions.uuid);
+    assert.ok(sessions.isActive);
+    assert.ok(sessions.maxConcurrent);
+    assert.ok(sessions.currentUsage);
   });
 });

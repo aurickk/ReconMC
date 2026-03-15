@@ -161,6 +161,39 @@ export interface ScanResultWithId {
   result: FullScanResult;
 }
 
+export interface QueueDiagnostics {
+  queue: {
+    pending: number;
+    processing: number;
+    completed: number;
+    failed: number;
+    totalServers: number;
+  };
+  sessions: {
+    total: number;
+    active: number;
+    available: number;
+    totalCapacity: number;
+    usedCapacity: number;
+  };
+  proxies: {
+    total: number;
+    active: number;
+    available: number;
+    totalCapacity: number;
+    usedCapacity: number;
+  };
+  agents: {
+    total: number;
+    idle: number;
+    busy: number;
+    stale: number;
+  };
+  stuckItems: number;
+  issues: string[];
+  canProcess: boolean;
+}
+
 export class CoordinatorAPIClient {
   private baseUrl: string;
   private apiKey: string | undefined;
@@ -252,6 +285,27 @@ export class CoordinatorAPIClient {
     }
 
     return response.json() as Promise<QueueStatus>;
+  }
+
+  /**
+   * Get queue diagnostics including session and proxy availability
+   */
+  async getQueueDiagnostics(): Promise<QueueDiagnostics | null> {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/queue/diagnostics`, {
+        headers: this.getHeaders(),
+      });
+
+      if (!response.ok) {
+        logger.debug(`[CoordinatorAPI] Diagnostics endpoint returned ${response.status}`);
+        return null;
+      }
+
+      return response.json() as Promise<QueueDiagnostics>;
+    } catch (error) {
+      logger.debug(`[CoordinatorAPI] Failed to fetch diagnostics:`, error);
+      return null;
+    }
   }
 
   /**

@@ -52,20 +52,18 @@ export interface Agent {
   status: string;
   currentQueueId: string | null;
   taskAddress: string | null;
-  lastSeenAt: string | null;
-  createdAt: string;
+  lastHeartbeat: string;
+  registeredAt: string;
+  offline: boolean;
 }
 
-export interface Account {
+export interface Session {
   id: string;
-  type: 'microsoft' | 'cracked';
   username: string | null;
+  uuid: string | null;
   currentUsage: number;
   maxConcurrent: number;
   isActive: boolean;
-  isValid: boolean;
-  lastValidatedAt: string | null;
-  lastValidationError: string | null;
   lastUsedAt: string | null;
   createdAt: string;
 }
@@ -116,7 +114,7 @@ export interface QueueEntry {
   status: 'pending' | 'processing' | 'completed' | 'failed';
   assignedAgentId: string | null;
   assignedProxyId: string | null;
-  assignedAccountId: string | null;
+  assignedSessionId: string | null;
   errorMessage: string | null;
   retryCount: number;
   createdAt: string;
@@ -139,11 +137,11 @@ export interface QueueEntriesResponse {
   offset: number;
 }
 
-export interface AccountImportResult {
+export interface SessionImportResult {
   imported: number;
-  successful: number;
-  failed: number;
-  accounts: Account[];
+  rejected: number;
+  sessions: Session[];
+  errors: Array<{ index: number; valid: boolean; error?: string }>;
 }
 
 export interface ProxyImportResult {

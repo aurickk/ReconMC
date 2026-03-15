@@ -16,7 +16,7 @@ const navigation = [
   { name: 'Scan Queue', href: '/', icon: Scan },
   { name: 'Servers', href: '/servers', icon: Server },
   { name: 'Agents', href: '/agents', icon: Zap },
-  { name: 'Accounts', href: '/accounts', icon: Users },
+  { name: 'Sessions', href: '/sessions', icon: Users },
   { name: 'Proxies', href: '/proxies', icon: Shield },
 ];
 </script>

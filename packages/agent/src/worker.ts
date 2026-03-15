@@ -2,7 +2,6 @@ import { runFullScan } from './scanner.js';
 import { setTaskContext, clearTaskContext, interceptConsole, logger } from './logger.js';
 import { AGENT_ID, COORDINATOR_URL } from './config.js';
 import type { Account } from '@reconmc/bot';
-import { setTokenRefreshCallback, clearTokenRefreshCallback } from '@reconmc/bot';
 
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS ?? '5000', 10);
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -13,12 +12,11 @@ function getCoordinatorBase(): string {
   return COORDINATOR_URL.replace(/\/$/, '');
 }
 
-interface CoordinatorAccount {
+interface CoordinatorSession {
   id: string;
-  type: string;
   username?: string;
   accessToken?: string;
-  refreshToken?: string;
+  // no type, no refreshToken -- sessions are disposable
 }
 
 async function fetchWithRetry(
@@ -44,22 +42,15 @@ async function fetchWithRetry(
   return null;
 }
 
-function buildAccount(account: CoordinatorAccount): { account: Account; accountId: string } {
-  if (account.type === 'microsoft') {
-    if (!account.accessToken) throw new Error('Microsoft account missing accessToken');
-    return {
-      account: {
-        type: 'microsoft',
-        accessToken: account.accessToken,
-        refreshToken: account.refreshToken,
-      },
-      accountId: account.id,
-    };
-  }
-  const username = account.username ?? `Recon${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}`;
+function buildSession(session: CoordinatorSession): { account: Account; sessionId: string } {
+  if (!session.accessToken) throw new Error('Session missing accessToken');
   return {
-    account: { type: 'cracked', username },
-    accountId: account.id,
+    account: {
+      type: 'microsoft',
+      accessToken: session.accessToken,
+      // no refreshToken -- sessions are disposable
+    },
+    sessionId: session.id,
   };
 }
 
@@ -93,7 +84,7 @@ async function claimTask(base: string): Promise<{
   serverAddress: string;
   port: number;
   proxy: { host: string; port: number; type: 'socks4' | 'socks5'; username?: string; password?: string };
-  account: CoordinatorAccount;
+  session: CoordinatorSession;
 } | null> {
   const res = await fetch(`${base}/api/queue/claim`, {
     method: 'POST',
@@ -107,7 +98,7 @@ async function claimTask(base: string): Promise<{
     serverAddress: string;
     port: number;
     proxy: { host: string; port: number; type: 'socks4' | 'socks5'; username?: string; password?: string };
-    account: CoordinatorAccount;
+    session: CoordinatorSession;
   };
   return data;
 }
@@ -142,24 +133,65 @@ async function failTask(base: string, queueId: string, errorMessage: string): Pr
   }
 }
 
-async function reportRefreshedTokens(base: string, accountId: string, tokens: {
-  accessToken: string;
-  refreshToken?: string;
-}): Promise<void> {
-  try {
-    const res = await fetch(`${base}/api/accounts/${accountId}/tokens`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(tokens),
-    });
-    if (res.ok) {
-      logger.info(`[Agent] Reported refreshed tokens for account`);
-    } else {
-      logger.warn(`[Agent] Failed to report refreshed tokens: HTTP ${res.status}`);
-    }
-  } catch (err) {
-    logger.warn(`[Agent] Failed to report refreshed tokens: ${err}`);
+/**
+ * Invalidate a session by reporting it to the coordinator.
+ * Returns whether a replacement session is available for retry.
+ */
+async function invalidateSession(base: string, sessionId: string): Promise<{ deleted: boolean; retryWith: CoordinatorSession | null }> {
+  const res = await fetchWithRetry(
+    `${base}/api/sessions/${sessionId}/invalidate`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+    'invalidate-session'
+  );
+  if (!res) return { deleted: false, retryWith: null };
+  const body = await res.json() as { deleted: boolean; retryWith: CoordinatorSession | null };
+  return body;
+}
+
+/**
+ * Check if a scan error indicates an authentication failure.
+ * Only auth-specific errors should trigger session invalidation --
+ * NOT network errors, timeouts, or server-side issues.
+ */
+function isAuthFailure(error: unknown): boolean {
+  if (!error) return false;
+
+  const message = error instanceof Error ? error.message : String(error);
+  const lowerMessage = message.toLowerCase();
+
+  // Auth-specific kick reasons
+  if (lowerMessage.includes('invalid session') ||
+      lowerMessage.includes('failed to login') ||
+      lowerMessage.includes('multiplayer.disconnect') ||
+      lowerMessage.includes('authentication failed') ||
+      lowerMessage.includes('microsoft authentication failed')) {
+    return true;
   }
+
+  // Check for error object with code
+  if (error && typeof error === 'object') {
+    const errorObj = error as Record<string, unknown>;
+    const code = typeof errorObj.code === 'string' ? errorObj.code : '';
+    if (code === 'AUTH_FAILED' || code === 'TOKEN_INVALID') {
+      return true;
+    }
+    // Check kick reason for auth indicators
+    if (typeof errorObj.kickReason === 'string') {
+      const reason = errorObj.kickReason.toLowerCase();
+      if (reason.includes('invalid session') ||
+          reason.includes('failed to login') ||
+          reason.includes('multiplayer.disconnect') ||
+          reason.includes('not authenticated')) {
+        return true;
+      }
+    }
+  }
+
+  // Do NOT treat these as auth failures:
+  // - ECONNREFUSED, ETIMEDOUT, ECONNRESET (network errors)
+  // - KICKED_WHITELIST, KICKED_BANNED, KICKED_FULL (server policy)
+  // - PROXY_ERROR (proxy issues)
+  return false;
 }
 
 export async function runWorker(): Promise<void> {
@@ -197,7 +229,7 @@ export async function runWorker(): Promise<void> {
     }
 
     await heartbeat(base, 'busy', claimed.queueId);
-    const { queueId, serverAddress, port, proxy, account } = claimed;
+    const { queueId, serverAddress, port, proxy, session } = claimed;
 
     // Set logging context for this task
     setTaskContext(queueId);
@@ -206,7 +238,7 @@ export async function runWorker(): Promise<void> {
     const displayServer = serverAddress.includes(':') ? serverAddress : `${serverAddress}:${port}`;
     logger.info(`[Task] ${queueId} - Received task for ${displayServer}`);
     logger.info(`[Task] ${queueId} - Proxy: ${proxy.type} (IP redacted)`);
-    logger.info(`[Task] ${queueId} - Account type: ${account.type}${account.type === 'microsoft' ? ' (Microsoft authentication)' : ''}`);
+    logger.info(`[Task] ${queueId} - Session: microsoft (token redacted)`);
 
     // Add overall timeout for the entire scan (60 seconds max per task)
     const scanTimeoutMs = 60000;
@@ -214,17 +246,8 @@ export async function runWorker(): Promise<void> {
     const taskStartTime = Date.now();
 
     try {
-      const { account: acc, accountId } = buildAccount(account);
+      const { account: acc, sessionId } = buildSession(session);
       const host = serverAddress.includes(':') ? serverAddress.split(':')[0]! : serverAddress;
-
-      // Set up token refresh callback for Microsoft accounts
-      if (acc.type === 'microsoft') {
-        // Clear any previous callback before setting a new one
-        clearTokenRefreshCallback();
-        setTokenRefreshCallback(accountId, (id: string, tokens: { accessToken: string; refreshToken?: string }) => {
-          return reportRefreshedTokens(base, id, tokens);
-        });
-      }
 
       // Set up timeout to fail the scan if it takes too long
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -233,36 +256,102 @@ export async function runWorker(): Promise<void> {
         }, scanTimeoutMs);
       });
 
-      const fullResult = await Promise.race([
-        runFullScan({
-          host,
-          port,
-          proxy: {
-            host: proxy.host,
-            port: proxy.port,
-            type: proxy.type,
-            username: proxy.username,
-            password: proxy.password,
-          },
-          account: acc,
-          collectPlugins: true,
-          pluginTimeout: 5000,
-          enableAutoAuth: true,
-          authTimeout: 3000,
-        }),
-        timeoutPromise,
-      ]);
+      let fullResult;
+      try {
+        fullResult = await Promise.race([
+          runFullScan({
+            host,
+            port,
+            proxy: {
+              host: proxy.host,
+              port: proxy.port,
+              type: proxy.type,
+              username: proxy.username,
+              password: proxy.password,
+            },
+            account: acc,
+            collectPlugins: true,
+            pluginTimeout: 5000,
+            enableAutoAuth: true,
+            authTimeout: 3000,
+          }),
+          timeoutPromise,
+        ]);
+      } catch (scanError) {
+        if (scanTimeoutHandle) {
+          clearTimeout(scanTimeoutHandle);
+          scanTimeoutHandle = null;
+        }
+
+        // Check if this is an auth failure -- if so, invalidate session and retry once
+        if (isAuthFailure(scanError)) {
+          logger.warn(`[Task] ${queueId} - Auth failure detected, invalidating session`);
+          const invalidation = await invalidateSession(base, sessionId);
+
+          if (invalidation.retryWith) {
+            logger.info(`[Task] ${queueId} - Retrying with replacement session`);
+            const { account: retryAcc } = buildSession(invalidation.retryWith);
+
+            // Single retry with new session
+            const retryTimeoutPromise = new Promise<never>((_, reject) => {
+              scanTimeoutHandle = setTimeout(() => {
+                reject(new Error(`Scan retry timed out after ${scanTimeoutMs}ms`));
+              }, scanTimeoutMs);
+            });
+
+            fullResult = await Promise.race([
+              runFullScan({
+                host,
+                port,
+                proxy: {
+                  host: proxy.host,
+                  port: proxy.port,
+                  type: proxy.type,
+                  username: proxy.username,
+                  password: proxy.password,
+                },
+                account: retryAcc,
+                collectPlugins: true,
+                pluginTimeout: 5000,
+                enableAutoAuth: true,
+                authTimeout: 3000,
+              }),
+              retryTimeoutPromise,
+            ]);
+          } else {
+            // No replacement session available
+            throw new Error('Auth failure and no available sessions for retry');
+          }
+        } else {
+          // Not an auth failure -- rethrow
+          throw scanError;
+        }
+      }
 
       if (scanTimeoutHandle) {
         clearTimeout(scanTimeoutHandle);
         scanTimeoutHandle = null;
       }
 
+      // Check if the scan result itself indicates an auth failure (e.g. kicked for invalid session)
+      if (fullResult.connection && !fullResult.connection.success && fullResult.connection.error) {
+        const connError = fullResult.connection.error;
+        if (connError.code === 'AUTH_FAILED' || connError.code === 'TOKEN_INVALID' ||
+            (connError.kicked && connError.kickReason &&
+             (connError.kickReason.toLowerCase().includes('invalid session') ||
+              connError.kickReason.toLowerCase().includes('failed to login') ||
+              connError.kickReason.toLowerCase().includes('multiplayer.disconnect')))) {
+          logger.warn(`[Task] ${queueId} - Scan completed but auth failure detected in result, invalidating session`);
+          await invalidateSession(base, sessionId);
+          // Don't retry here -- the scan completed (with ping data), so report the result
+        }
+      }
+
       // Log completion summary BEFORE clearing context
-      const pingSuccess = fullResult.ping?.success ? '✓' : '✗';
+      const pingSuccess = fullResult.ping?.success ? 'Y' : 'N';
       const pingLatency = fullResult.ping?.status?.latency ?? 'N/A';
       const pingLatencyStr = typeof pingLatency === 'number' ? `${pingLatency}ms` : String(pingLatency);
-      const connSuccess = fullResult.connection?.success ? '✓' : '✗';
+      const connSuccess = fullResult.connection?.success ? 'Y' : 'N';
       const connLatency = fullResult.connection?.latency;
       const connLatencyStr = connLatency ? `${connLatency}ms` : 'N/A';
       const plugins = fullResult.connection?.serverPlugins?.plugins?.length || 0;
@@ -300,8 +389,6 @@ export async function runWorker(): Promise<void> {
       await clearTaskContext();
       await failTask(base, queueId, message);
     }
-    // Note: Token refresh callback persists across tasks for the same account
-    // It's only cleared when a different account is assigned or agent shuts down
 
     await heartbeat(base, 'idle');
     lastHeartbeat = Date.now();

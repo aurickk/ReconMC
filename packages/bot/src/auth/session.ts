@@ -1,50 +1,16 @@
 /**
  * Session token authentication handler.
- * Auth API calls use direct connections (legitimate OAuth) - not proxied.
- * Only game connections to Minecraft servers require proxy routing.
+ * Validates tokens against the Minecraft profile API.
+ * No refresh flow -- sessions are disposable.
  */
 
-import type { MicrosoftTokenAccount, AuthResult, TokenRefreshCallback } from './types';
+import type { MicrosoftTokenAccount, AuthResult } from './types';
 import type { SocksProxyConfig } from './proxied-fetch';
 import { logger } from '../logger.js';
 import {
   validateTokenWithProfile,
-  fullRefreshFlow,
   getCachedTokenValidity,
 } from '@reconmc/scanner';
-import type { FullRefreshFlowResult } from '@reconmc/scanner';
-
-let globalTokenRefreshCallback: TokenRefreshCallback | undefined;
-let globalAccountId: string | undefined;
-
-export function setTokenRefreshCallback(accountId: string, callback: TokenRefreshCallback): void {
-  globalAccountId = accountId;
-  globalTokenRefreshCallback = callback;
-}
-
-export function clearTokenRefreshCallback(): void {
-  globalAccountId = undefined;
-  globalTokenRefreshCallback = undefined;
-}
-
-async function runRefreshFlow(refreshToken: string): Promise<AuthResult> {
-  const result = await fullRefreshFlow(refreshToken, globalThis.fetch, logger);
-  if (!result.success) {
-    return { success: false, error: result.error };
-  }
-  return {
-    success: true,
-    accessToken: result.accessToken,
-    refreshToken: result.refreshToken,
-    profile: result.profile,
-    userHash: result.userHash,
-    refreshed: true,
-    msAccessToken: result.msAccessToken,
-    xblToken: result.xblToken,
-    xstsToken: result.xstsToken,
-    expiresOn: result.expiresOn,
-  };
-}
 
 /**
  * Main authentication function.
@@ -62,10 +28,8 @@ export async function authenticateWithToken(
       return {
         success: true,
         accessToken: account.accessToken,
-        refreshToken: account.refreshToken,
         profile: cached.profile,
         userHash: undefined,
-        refreshed: false,
       };
     }
 
@@ -77,39 +41,17 @@ export async function authenticateWithToken(
       return {
         success: true,
         accessToken: account.accessToken,
-        refreshToken: account.refreshToken,
         profile: validation.profile,
         userHash: undefined,
-        refreshed: false,
       };
     }
 
-    if (!account.refreshToken) {
-      logger.error(`[authenticateWithToken] Token invalid (${validation.statusCode}: ${validation.error}), no refresh token`);
-      return {
-        success: false,
-        error: `Token invalid and no refresh token. Re-authenticate the account.`,
-      };
-    }
-
-    logger.debug(`[authenticateWithToken] Token invalid (${validation.statusCode}), refreshing...`);
-    const result = await runRefreshFlow(account.refreshToken);
-
-    if (result.success && result.refreshed && globalTokenRefreshCallback && globalAccountId) {
-      if (result.accessToken && result.refreshToken) {
-        try {
-          await globalTokenRefreshCallback(globalAccountId, {
-            accessToken: result.accessToken,
-            refreshToken: result.refreshToken,
-          });
-          logger.debug('[authenticateWithToken] Reported refreshed tokens');
-        } catch (err) {
-          logger.warn('[authenticateWithToken] Failed to report tokens:', err);
-        }
-      }
-    }
-
-    return result;
+    // No refresh flow -- token is invalid, report failure
+    logger.error(`[authenticateWithToken] Token invalid (${validation.statusCode}: ${validation.error})`);
+    return {
+      success: false,
+      error: `Token invalid: ${validation.error ?? 'unknown error'}. Session should be invalidated.`,
+    };
   } catch (err) {
     return {
       success: false,

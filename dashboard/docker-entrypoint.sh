@@ -3,11 +3,12 @@ set -e
 
 # Default API_URL if not set
 : "${API_URL:=http://coordinator:3000}"
+: "${DASHBOARD_PORT:=80}"
 
 # Substitute environment variables in nginx config template
-envsubst '${API_URL}' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf
+envsubst '${API_URL} ${DASHBOARD_PORT}' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf
 
-echo "Dashboard starting with API_URL: ${API_URL}"
+echo "Dashboard starting on port ${DASHBOARD_PORT} with API_URL: ${API_URL}"
 
 # Start nginx
 exec nginx -g 'daemon off;'

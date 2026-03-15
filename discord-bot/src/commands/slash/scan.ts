@@ -108,8 +108,20 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   try {
     // Send initial "scanning" message
     await interaction.editReply({
-      content: `🔍 Scanning ${ip}:${port}... This may take up to 2 minutes.`,
+      content: `Scanning ${ip}:${port}... This may take up to 2 minutes.`,
     });
+
+    // Check session pool availability and warn if empty
+    const diagnostics = await api.getQueueDiagnostics();
+    if (diagnostics && diagnostics.sessions.total === 0) {
+      await interaction.editReply({
+        content: `Scanning ${ip}:${port}... Waiting for available session tokens. Import tokens via the dashboard to start scanning.`,
+      });
+    } else if (diagnostics && diagnostics.sessions.available === 0 && diagnostics.sessions.total > 0) {
+      await interaction.editReply({
+        content: `Scanning ${ip}:${port}... All session tokens are currently in use. The scan will proceed when a token becomes available.`,
+      });
+    }
 
     logger.debug(`[SlashCommand] Calling coordinator API at ${config.coordinatorUrl}...`);
     const scanResult = await api.scanServer(ip, port);

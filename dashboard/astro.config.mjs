@@ -4,8 +4,11 @@ import vue from '@astrojs/vue';
 import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { loadEnv } from 'vite';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const env = loadEnv('', process.cwd(), '');
+const apiTarget = env.API_URL || 'http://localhost:3001';
 
 export default defineConfig({
   integrations: [vue()],
@@ -22,7 +25,7 @@ export default defineConfig({
     server: {
       proxy: {
         '/api': {
-          target: 'http://localhost:3001',
+          target: apiTarget,
           changeOrigin: true,
         },
       },

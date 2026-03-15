@@ -15,8 +15,6 @@ export {
   createCrackedAccount,
   getAccountProfile,
   getAccountAuth,
-  setTokenRefreshCallback,
-  clearTokenRefreshCallback,
 } from './auth/index.js';
 export type { SocksProxyConfig } from './auth/proxied-fetch.js';
 export { proxiedFetch, createFetchFn } from './auth/proxied-fetch.js';

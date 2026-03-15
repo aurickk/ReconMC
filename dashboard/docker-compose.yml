@@ -5,17 +5,14 @@ services:
       dockerfile: Dockerfile
     environment:
       - API_URL=${API_URL:-http://coordinator:3000}
+      - DASHBOARD_PORT=${DASHBOARD_PORT:-8080}
     ports:
-      - "${DASHBOARD_PORT:-8080}:80"
+      - "${DASHBOARD_PORT:-8080}:${DASHBOARD_PORT:-8080}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
     restart: unless-stopped
-    networks:
-      - reconmc_default
-
-networks:
-  reconmc_default:
-    external: true

@@ -48,6 +48,16 @@ function getStatusBadge(status: string): { class: string; label: string } {
   }
 }
 
+const stats = computed(() => ({
+  total: agents.value.length,
+  online: agents.value.filter(a => !a.offline).length,
+  scanning: agents.value.filter(a => a.status === 'busy').length,
+}));
+
+const sortedAgents = computed(() =>
+  agents.value.slice().sort((a, b) => a.id.localeCompare(b.id))
+);
+
 onMounted(() => {
   fetchData();
   pollInterval = setInterval(fetchData, 10000);
@@ -143,7 +153,7 @@ onUnmounted(() => {
               <TableCell>
                 <div class="flex items-center gap-1">
                   <Clock class="h-3 w-3 text-muted-foreground" />
-                  {{ formatRelativeTime(agent.lastSeenAt) }}
+                  {{ formatRelativeTime(agent.lastHeartbeat) }}
                 </div>
               </TableCell>
             </TableRow>

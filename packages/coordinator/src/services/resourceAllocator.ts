@@ -1,12 +1,12 @@
 import { and, eq, lt, asc, sql } from 'drizzle-orm';
 import type { Db } from '../db/index.js';
-import { proxies, accounts } from '../db/schema.js';
-import type { Proxy, Account } from '../db/schema.js';
+import { proxies, sessions, scanQueue } from '../db/schema.js';
+import type { Proxy, Session } from '../db/schema.js';
 import { logger } from '../logger.js';
 
 export interface AllocatedResources {
   proxy: Proxy;
-  account: Account;
+  session: Session;
 }
 
 // Use any for transaction type - drizzle's type extraction is too complex
@@ -34,34 +34,29 @@ export async function allocateResourcesTx(tx: Transaction): Promise<AllocatedRes
     return null;
   }
 
-  const availableAccount = await tx
+  const availableSession = await tx
     .select()
-    .from(accounts)
+    .from(sessions)
     .where(
       and(
-        eq(accounts.isActive, true),
-        eq(accounts.isValid, true),
-        lt(accounts.currentUsage, accounts.maxConcurrent)
+        eq(sessions.isActive, true),
+        lt(sessions.currentUsage, sessions.maxConcurrent)
       )
     )
-    .orderBy(asc(accounts.currentUsage), asc(accounts.lastUsedAt))
+    .orderBy(asc(sessions.currentUsage), asc(sessions.lastUsedAt))
     .limit(1)
     .for('update');
 
-  if (availableAccount.length === 0) {
-    // Log why no account is available
-    const accountCount = await tx.select({ count: sql<number>`count(*)::int` }).from(accounts);
-    const activeAccountCount = await tx.select({ count: sql<number>`count(*)::int` }).from(accounts).where(eq(accounts.isActive, true));
-    const validAccountCount = await tx
+  if (availableSession.length === 0) {
+    // Log why no session is available
+    const sessionCount = await tx.select({ count: sql<number>`count(*)::int` }).from(sessions);
+    const activeSessionCount = await tx.select({ count: sql<number>`count(*)::int` }).from(sessions).where(eq(sessions.isActive, true));
+    const availableSessionCount = await tx
       .select({ count: sql<number>`count(*)::int` })
-      .from(accounts)
-      .where(and(eq(accounts.isActive, true), eq(accounts.isValid, true)));
-    const availableAccountCount = await tx
-      .select({ count: sql<number>`count(*)::int` })
-      .from(accounts)
-      .where(and(eq(accounts.isActive, true), eq(accounts.isValid, true), lt(accounts.currentUsage, accounts.maxConcurrent)));
+      .from(sessions)
+      .where(and(eq(sessions.isActive, true), lt(sessions.currentUsage, sessions.maxConcurrent)));
 
-    logger.warn(`[ResourceAllocator] No account available. Total: ${accountCount[0]?.count ?? 0}, Active: ${activeAccountCount[0]?.count ?? 0}, Valid: ${validAccountCount[0]?.count ?? 0}, Available: ${availableAccountCount[0]?.count ?? 0}`);
+    logger.warn(`[ResourceAllocator] No session available. Total: ${sessionCount[0]?.count ?? 0}, Active: ${activeSessionCount[0]?.count ?? 0}, Available: ${availableSessionCount[0]?.count ?? 0}`);
     return null;
   }
 
@@ -74,18 +69,18 @@ export async function allocateResourcesTx(tx: Transaction): Promise<AllocatedRes
     .where(eq(proxies.id, availableProxy[0].id));
 
   await tx
-    .update(accounts)
+    .update(sessions)
     .set({
-      currentUsage: sql`${accounts.currentUsage} + 1`,
+      currentUsage: sql`${sessions.currentUsage} + 1`,
       lastUsedAt: new Date(),
     })
-    .where(eq(accounts.id, availableAccount[0].id));
+    .where(eq(sessions.id, availableSession[0].id));
 
-  logger.debug(`[ResourceAllocator] Allocated proxy ${availableProxy[0].id} and account ${availableAccount[0].id}`);
+  logger.debug(`[ResourceAllocator] Allocated proxy ${availableProxy[0].id} and session ${availableSession[0].id}`);
 
   return {
     proxy: availableProxy[0],
-    account: availableAccount[0],
+    session: availableSession[0],
   };
 }
 
@@ -96,15 +91,15 @@ export async function allocateResources(db: Db): Promise<AllocatedResources | nu
 export async function releaseResources(
   db: Db,
   proxyId: string,
-  accountId: string
+  sessionId: string
 ): Promise<void> {
-  await db.transaction(async (tx) => releaseResourcesTx(tx as Transaction, proxyId, accountId));
+  await db.transaction(async (tx) => releaseResourcesTx(tx as Transaction, proxyId, sessionId));
 }
 
 export async function releaseResourcesTx(
   tx: Transaction,
   proxyId: string,
-  accountId: string
+  sessionId: string
 ): Promise<void> {
   await tx
     .update(proxies)
@@ -115,10 +110,43 @@ export async function releaseResourcesTx(
     .where(eq(proxies.id, proxyId));
 
   await tx
-    .update(accounts)
+    .update(sessions)
     .set({
       // Use GREATEST to prevent negative values if called twice
-      currentUsage: sql`GREATEST(${accounts.currentUsage} - 1, 0)`,
+      currentUsage: sql`GREATEST(${sessions.currentUsage} - 1, 0)`,
     })
-    .where(eq(accounts.id, accountId));
+    .where(eq(sessions.id, sessionId));
+}
+
+/**
+ * Reconcile currentUsage counters with actual in-progress scans.
+ * Fixes leaked usage from crashes, canceled scans, or bugs.
+ * Should run at startup and periodically.
+ */
+export async function reconcileResourceUsage(db: Db): Promise<void> {
+  // Reset proxy currentUsage to actual number of processing scans assigned to each proxy
+  await db.execute(sql`
+    UPDATE proxies SET current_usage = COALESCE(sq.actual, 0)
+    FROM (
+      SELECT p.id, COUNT(q.id)::int AS actual
+      FROM proxies p
+      LEFT JOIN scan_queue q ON q.assigned_proxy_id = p.id AND q.status = 'processing'
+      GROUP BY p.id
+    ) sq
+    WHERE proxies.id = sq.id AND proxies.current_usage != COALESCE(sq.actual, 0)
+  `);
+
+  // Reset session currentUsage to actual number of processing scans assigned to each session
+  await db.execute(sql`
+    UPDATE sessions SET current_usage = COALESCE(sq.actual, 0)
+    FROM (
+      SELECT s.id, COUNT(q.id)::int AS actual
+      FROM sessions s
+      LEFT JOIN scan_queue q ON q.assigned_session_id = s.id AND q.status = 'processing'
+      GROUP BY s.id
+    ) sq
+    WHERE sessions.id = sq.id AND sessions.current_usage != COALESCE(sq.actual, 0)
+  `);
+
+  logger.info('[ResourceAllocator] Reconciled resource usage counters');
 }

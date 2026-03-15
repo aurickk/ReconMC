@@ -1,4 +1,4 @@
-import type { ApiResponse, ApiError, AuthStatus, HealthStatus, DashboardStats, Server, ServersResponse, QueueEntry, QueueEntriesResponse, Account, Proxy, AccountImportResult, ProxyImportResult, ServerDetail, Agent } from './types';
+import type { ApiResponse, ApiError, AuthStatus, HealthStatus, DashboardStats, Server, ServersResponse, QueueEntry, QueueEntriesResponse, Session, Proxy, SessionImportResult, ProxyImportResult, ServerDetail, Agent } from './types';
 
 const API_BASE = import.meta.env.API_BASE || '';
 
@@ -126,32 +126,20 @@ class ApiClient {
     return this.get<QueueEntry[]>(`/api/queue/entries?status=${status}&limit=${limit}&offset=${offset}`);
   }
 
-  async getAccounts(): Promise<ApiResponse<Account[]>> {
-    return this.get<Account[]>('/api/accounts');
+  async getSessions(): Promise<ApiResponse<Session[]>> {
+    return this.get<Session[]>('/api/sessions');
   }
 
-  async createAccount(data: { type: string; username?: string; accessToken?: string; refreshToken?: string; maxConcurrent?: number }): Promise<ApiResponse<Account>> {
-    return this.post<Account>('/api/accounts', data);
+  async createSession(data: { accessToken: string; maxConcurrent?: number }): Promise<ApiResponse<Session>> {
+    return this.post<Session>('/api/sessions', data);
   }
 
-  async updateAccount(id: string, data: Partial<{ username: string; accessToken: string; refreshToken: string; isActive: boolean; maxConcurrent: number }>): Promise<ApiResponse<Account>> {
-    return this.put<Account>(`/api/accounts/${id}`, data);
+  async deleteSession(id: string): Promise<ApiResponse<void>> {
+    return this.delete<void>(`/api/sessions/${id}`);
   }
 
-  async deleteAccount(id: string): Promise<ApiResponse<void>> {
-    return this.delete<void>(`/api/accounts/${id}`);
-  }
-
-  async validateAccount(id: string): Promise<ApiResponse<{ valid: boolean; username?: string; error?: string; account: Account }>> {
-    return this.post<{ valid: boolean; username?: string; error?: string; account: Account }>(`/api/accounts/${id}/validate`);
-  }
-
-  async importAccounts(accounts: Array<{ type: string; username?: string; accessToken?: string; refreshToken?: string }>): Promise<ApiResponse<AccountImportResult>> {
-    return this.post<AccountImportResult>('/api/accounts/import', { accounts });
-  }
-
-  async exportAccounts(): Promise<ApiResponse<Array<{ type: string; username?: string; accessToken?: string; refreshToken?: string; maxConcurrent: number }>>> {
-    return this.get<Array<{ type: string; username?: string; accessToken?: string; refreshToken?: string; maxConcurrent: number }>>('/api/accounts/export');
+  async importSessions(tokens: string[]): Promise<ApiResponse<SessionImportResult>> {
+    return this.post<SessionImportResult>('/api/sessions/import', { tokens });
   }
 
   async getProxies(): Promise<ApiResponse<Proxy[]>> {

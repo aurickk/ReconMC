@@ -3,18 +3,12 @@
  */
 
 export * from './types';
-export * from './microsoft';
 export * from './session';
 export * from './proxied-fetch';
 
-import type { Account, CrackedAccount, MicrosoftTokenAccount, AuthResult, TokenRefreshCallback } from './types';
+import type { Account, CrackedAccount, MicrosoftTokenAccount, AuthResult } from './types';
 import type { SocksProxyConfig } from './proxied-fetch';
-import { validateTokenAccount, authenticateWithToken, getMinecraftProfile, setTokenRefreshCallback, clearTokenRefreshCallback } from './session';
-
-/**
- * Set the token refresh callback for reporting refreshed tokens
- */
-export { setTokenRefreshCallback, clearTokenRefreshCallback };
+import { validateTokenAccount, authenticateWithToken, getMinecraftProfile } from './session';
 
 /**
  * Validate a cracked account
@@ -67,15 +61,13 @@ export function getAuthString(account: Account): 'offline' | 'microsoft' {
 }
 
 /**
- * Get access token for Microsoft accounts (if available)
+ * Get access token for Microsoft accounts
+ * Simply returns the token directly -- no auth flow needed
  */
 export async function getAccessToken(
   account: Account
 ): Promise<string | null> {
-  if (account.type === 'microsoft') {
-    const result = await authenticateWithToken(account);
-    return result.success ? (result.accessToken ?? null) : null;
-  }
+  if (account.type === 'microsoft') return account.accessToken;
   return null;
 }
 
