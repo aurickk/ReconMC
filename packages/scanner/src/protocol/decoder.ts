@@ -5,7 +5,7 @@ import type { Packet } from '../types.js';
  * Process incoming packet data chunks
  * Handles packet parsing, state management, and latency calculation
  */
-export async function packetPipeline(chunk: Uint8Array, packet: Packet): Promise<Packet> {
+export function packetPipeline(chunk: Uint8Array, packet: Packet): Packet {
   // If ping was sent, the next packet should be the pong response
   // The pong is a NEW packet, not a continuation of the status response
   if (packet.status.pingSent && !packet.status.pingBaked) {
@@ -13,7 +13,7 @@ export async function packetPipeline(chunk: Uint8Array, packet: Packet): Promise
     // The chunk should be a complete packet by itself
     if (chunk.length >= 9) {
       // Parse the pong packet directly
-      return await handlePongPacket(chunk, packet);
+      return handlePongPacket(chunk, packet);
     }
   }
 
@@ -31,7 +31,7 @@ export async function packetPipeline(chunk: Uint8Array, packet: Packet): Promise
 
   // Initialize packet metadata if not done
   if (!packet.meta.packetInitialized) {
-    packet = await craftPacketMeta(packet);
+    packet = craftPacketMeta(packet);
   }
 
   // Check if we have received the full packet
@@ -41,7 +41,7 @@ export async function packetPipeline(chunk: Uint8Array, packet: Packet): Promise
 
   // Parse packet data
   if (!packet.meta.fieldsCrafted) {
-    packet = await craftData(packet);
+    packet = craftData(packet);
   }
 
   return packet;
@@ -51,7 +51,7 @@ export async function packetPipeline(chunk: Uint8Array, packet: Packet): Promise
  * Handle the pong packet separately from status response
  * The pong is a new packet with packet ID 1
  */
-async function handlePongPacket(chunk: Uint8Array, packet: Packet): Promise<Packet> {
+function handlePongPacket(chunk: Uint8Array, packet: Packet): Packet {
   // Pong packet format: [varint length] [varint packet ID=1] [8 bytes payload]
   // The first varint is the packet length (should be 9: 1 for packet ID + 8 for payload)
   const length = varint.decode(chunk);
@@ -80,7 +80,7 @@ async function handlePongPacket(chunk: Uint8Array, packet: Packet): Promise<Pack
 /**
  * Extract and decode packet data
  */
-async function craftData(packet: Packet): Promise<Packet> {
+function craftData(packet: Packet): Packet {
   // Slice off the metadata fields to get the data
   packet.fieldsBuffer = packet.dataBuffer.slice(packet.meta.metaLength!);
 
@@ -103,7 +103,7 @@ async function craftData(packet: Packet): Promise<Packet> {
 /**
  * Parse packet metadata (length, packet ID)
  */
-async function craftPacketMeta(packet: Packet): Promise<Packet> {
+function craftPacketMeta(packet: Packet): Packet {
   // Field 1: Length of the packet (VarInt)
   // Field 2: Packet ID (VarInt)
   // Field 3: Data fields

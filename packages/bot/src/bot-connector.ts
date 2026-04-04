@@ -1,13 +1,13 @@
 /**
  * Bot connector with retry logic and spawn verification
- * Supports Microsoft token authentication via session-based auth
  */
 
+import * as crypto from 'node:crypto';
 import mineflayer from 'mineflayer';
-import { createProxiedConnect } from './proxy';
+import { createProxiedConnect, createSocksAgent } from './proxy';
 import { getUsername, getAccountProfile, getAccountAuth } from './auth';
-import { pluginDetector, autoAuth } from './plugins';
-import type { BotConnectOptions, BotConnectResult, ServerPluginInfo, ServerAuthInfo, NBTCompoundNode, KickReason, MineflayerBotOptions } from './types';
+import { pluginDetector, autoAuth, commandDetector, gameModeDetector } from './plugins';
+import type { BotConnectOptions, BotConnectResult, ServerPluginInfo, ServerCommandInfo, ServerAuthInfo, ServerGameModeInfo, NBTCompoundNode, KickReason, MineflayerBotOptions } from './types';
 import type { AutoAuthResult } from './plugins/auto-auth';
 import { logger } from './logger.js';
 
@@ -137,7 +137,10 @@ function parseKickReason(bot: mineflayer.Bot, reason: KickReason): string {
         }
       }
 
-      // Try prismarine-chat-message parser
+      // Try prismarine-chat-message parser.
+      // NOTE: require() is used intentionally here because parseKickReason is synchronous
+      // and prismarine-chat-message is a CJS dependency already loaded by mineflayer.
+      // Converting to dynamic import() would require making the entire call chain async.
       try {
         const ChatMessage = require('prismarine-chat-message')(bot.version || '1.20.1');
         const parsed = new ChatMessage(reason);
@@ -178,6 +181,35 @@ function parseKickReason(bot: mineflayer.Bot, reason: KickReason): string {
 }
 
 /**
+ * Infer a structured error code from an error message string.
+ * Used when the error object has no explicit `.code` property.
+ */
+function inferErrorCode(message: string): string {
+  const lower = message.toLowerCase();
+
+  // Auth / session errors
+  if (lower.includes('invalid session') || lower.includes('failed to login') ||
+      lower.includes('multiplayer.disconnect') || lower.includes('authentication failed') ||
+      lower.includes('invalid token') || lower.includes('invalid credentials')) {
+    return 'AUTH_FAILED';
+  }
+  // Yggdrasil / token validation errors
+  if (lower.includes('yggdrasil') || lower.includes('invalid access token') ||
+      lower.includes('token is not valid') || lower.includes('forbidden')) {
+    return 'AUTH_FAILED';
+  }
+  // Network errors
+  if (lower.includes('econnrefused') || lower.includes('connection refused')) return 'ECONNREFUSED';
+  if (lower.includes('etimedout') || lower.includes('timed out') || lower.includes('timeout')) return 'ETIMEDOUT';
+  if (lower.includes('econnreset') || lower.includes('connection reset')) return 'ECONNRESET';
+  if (lower.includes('enotfound') || lower.includes('getaddrinfo')) return 'ENOTFOUND';
+  // Proxy errors
+  if (lower.includes('proxy')) return 'PROXY_ERROR';
+
+  return 'UNKNOWN';
+}
+
+/**
  * Parse error into a structured error object
  */
 function parseError(err: unknown): { code: string; message: string; kicked?: boolean; kickReason?: string } {
@@ -214,22 +246,23 @@ function parseError(err: unknown): { code: string; message: string; kicked?: boo
       ? error.message
       : 'Unknown error';
 
+    // Use explicit .code if available, otherwise infer from message
     const code = typeof error.code === 'string'
       ? error.code
-      : 'UNKNOWN';
+      : inferErrorCode(message);
 
     return { code, message };
   }
 
   return {
-    code: 'UNKNOWN',
+    code: inferErrorCode(String(err)),
     message: String(err),
   };
 }
 
 /**
  * Create a bot with proxy support and proper Microsoft token auth
- * SECURITY: Proxy is MANDATORY - bot will NOT connect without a proxy
+ * SECURITY: Proxy is mandatory for direct server connections.
  */
 async function createBot(
   options: BotConnectOptions,
@@ -238,13 +271,12 @@ async function createBot(
   const port = options.port ?? 25565;
   let username = getUsername(options.account);
 
-  // SECURITY: Proxy is mandatory - fail fast if not provided
+  // SECURITY: Proxy is mandatory for direct server connections.
   if (!options.proxy) {
-    throw new Error('Proxy is required for bot connection. Direct connections are not allowed for security reasons.');
+    logger.debug('[BotConnector] No proxy configured');
+  } else {
+    logger.debug(`[BotConnector] Using ${options.proxy.type.toUpperCase()} proxy: ${options.proxy.host}:${options.proxy.port}`);
   }
-
-  // Log proxy usage for security audit
-  logger.debug(`[BotConnector] Using ${options.proxy.type.toUpperCase()} proxy: ${options.proxy.host}:${options.proxy.port}`);
 
   // Variables for Microsoft auth
   let profile: { id: string; name: string } | null = null;
@@ -278,11 +310,19 @@ async function createBot(
     botOptions.auth = 'offline';
   } else if (options.account.type === 'microsoft') {
     // Authenticate using our own flow (bypass prismarine-auth completely)
+    // Route auth API calls through the same proxy to avoid rate limiting
+    const authProxy = options.proxy ? {
+      host: options.proxy.host,
+      port: options.proxy.port,
+      type: options.proxy.type,
+      username: options.proxy.username,
+      password: options.proxy.password,
+    } : undefined;
     logger.debug('[BotConnector] Fetching Microsoft auth...');
-    const authResult = await getAccountAuth(options.account);
+    const authResult = await getAccountAuth(options.account, authProxy);
 
     if (!authResult?.success) {
-      logger.debug(`[BotConnector] Failed to fetch auth: ${authResult?.error ?? 'unknown error'}`);
+      logger.warn(`[BotConnector] Microsoft auth failed: ${authResult?.error ?? 'unknown error'}`);
       throw new Error(`Microsoft authentication failed: ${authResult?.error ?? 'unknown error'}`);
     }
 
@@ -298,17 +338,11 @@ async function createBot(
     username = profile.name;
     botOptions.username = username;
 
-    // Use session-based auth - this bypasses prismarine-auth completely
-    // minecraft-protocol's encrypt.js uses both options.accessToken AND client.session
+    // Build session object for encrypt.js (session server join)
     const profileIdNoDashes = profile.id.replace(/-/g, '');
-
-    // Set accessToken directly on options - used by encrypt.js for session join
-    (botOptions as Partial<Record<string, unknown>>).accessToken = accessToken;
-
-    // Set session object - minecraft-protocol copies this to client.session
     sessionObject = {
       accessToken: accessToken,
-      clientToken: accessToken,  // Required by some code paths
+      clientToken: accessToken,
       selectedProfile: {
         id: profileIdNoDashes,
         name: profile.name,
@@ -318,48 +352,49 @@ async function createBot(
         name: profile.name,
       }],
     };
-    (botOptions as Partial<Record<string, unknown>>).session = sessionObject;
 
-    // Set haveCredentials to indicate we have valid auth
-    (botOptions as Partial<Record<string, unknown>>).haveCredentials = true;
+    // Custom auth function — bypasses both prismarine-auth and Yggdrasil.
+    // We already authenticated via getAccountAuth(); this just hands the
+    // session to minecraft-protocol and starts the TCP connection.
+    const capturedSession = sessionObject;
+    const capturedToken = accessToken;
+    (botOptions as Partial<Record<string, unknown>>).auth = function (client: any, opts: any) {
+      client.session = capturedSession;
+      client.username = capturedSession.selectedProfile.name;
+      opts.accessToken = capturedToken;
+      opts.haveCredentials = true;  // encrypt.js checks this to do session join
+      client.emit('session', capturedSession);
+      opts.connect(client);
+    };
 
     // Disable chat signing (not needed for our use case and requires certificates)
     (botOptions as Partial<Record<string, unknown>>).disableChatSigning = true;
 
-    logger.debug(`[BotConnector] Using session-based auth for: ${username} (${profileIdNoDashes})`);
+    logger.debug(`[BotConnector] Using pre-authenticated session for: ${username} (${profileIdNoDashes})`);
   }
 
-  // SECURITY: Proxy is mandatory - apply SOCKS proxy to all connections
-  // This ensures the bot never connects directly to the server
-  (botOptions as Partial<Record<string, unknown>>).connect = createProxiedConnect(options.proxy, options.host, port);
-  logger.debug(`[BotConnector] Proxy connection configured for ${options.host}:${port}`);
+  // Apply SOCKS proxy when available (mandatory for direct server connections).
+  if (options.proxy) {
+    (botOptions as Partial<Record<string, unknown>>).connect = createProxiedConnect(options.proxy, options.host, port);
+
+    // Also set an HTTPS agent that tunnels through the SOCKS proxy.
+    // This is used by minecraft-protocol's encrypt.js -> yggdrasil for the
+    // session server join request (POST sessionserver.mojang.com/session/minecraft/join).
+    // Without this, the session join HTTP call bypasses the proxy and fails
+    // when Mojang domains are blocked at the DNS/firewall level.
+    (botOptions as Partial<Record<string, unknown>>).agent = createSocksAgent(options.proxy);
+
+    logger.debug(`[BotConnector] Proxy connection configured for ${options.host}:${port}`);
+  }
 
   const bot = mineflayer.createBot(botOptions as any);
   botRef.bot = bot;
 
-  // For Microsoft auth, manually set session on the underlying client
-  // minecraft-protocol's encrypt.js reads from client.session.selectedProfile.id
-  // but the session isn't always copied automatically from options
-  if (options.account.type === 'microsoft' && accessToken && sessionObject && (bot as any)._client) {
-    const client = (bot as any)._client;
-    client.session = sessionObject;
-    client.accessToken = accessToken;
-    logger.debug(`[BotConnector] Session set on client: ${sessionObject.selectedProfile?.name || username}`);
-  }
-
   return bot;
 }
 
-/**
- * Generate a random password for cracked server auth
- */
 function generateAuthPassword(): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let password = '';
-  for (let i = 0; i < 16; i++) {
-    password += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return password;
+  return crypto.randomBytes(12).toString('base64url').slice(0, 16);
 }
 
 /**
@@ -407,10 +442,19 @@ async function attemptConnection(
     }));
   }
 
-  // Load plugin detector if collecting plugins
+  // Load plugin and command detectors if collecting plugins
   if (attemptOptions?.collectPlugins) {
     bot.loadPlugin(pluginDetector);
+    bot.loadPlugin(commandDetector);
+    bot.loadPlugin(gameModeDetector);
   }
+
+  // Auto-accept resource packs. Many servers (especially BungeeCord) send
+  // resource pack prompts during the configuration phase.  If the client
+  // doesn't respond, the server waits forever and the login hangs.
+  bot.on('resourcePack', () => {
+    bot.acceptResourcePack();
+  });
 
   return new Promise<BotConnectResult>((resolve) => {
     const doResolve = (result: BotConnectResult) => {
@@ -420,7 +464,10 @@ async function attemptConnection(
       resolve(result);
     };
 
-    // Set up timeout
+    // Set up timeout for the initial connection phase (TCP + protocol handshake + spawn).
+    // Once spawn fires, the timeout is cleared and post-spawn work (auth wait,
+    // plugin detection) runs with its own internal timeouts. This prevents
+    // post-spawn work from consuming the connection timeout budget.
     const timeoutHandle = setTimeout(() => {
       bot.end();
       doResolve({
@@ -437,13 +484,48 @@ async function attemptConnection(
       });
     }, timeout);
 
-    // Track spawn
-    bot.once('spawn', async () => {
+    // Track protocol state transitions to diagnose where connections hang.
+    // States: handshaking → login → play (→ configuration on 1.20.2+)
+    bot._client.on('state', (newState: string) => {
+      logger.info(`[Bot] Protocol state → ${newState} at ${Date.now() - startTime}ms`);
+    });
+
+    // Log packets received during configuration state to diagnose hangs.
+    bot._client.on('packet', (data: unknown, meta: { name?: string; state?: string }) => {
+      if (meta?.state === 'configuration' && meta.name !== 'registry_data') {
+        logger.info(`[Bot] Config packet: ${meta.name || 'unknown'} at ${Date.now() - startTime}ms`);
+      }
+    });
+
+    // --- Post-login data collection ---
+    // Shared handler that collects plugins, commands, and auth data.
+    // Triggered by either 'spawn' (ideal) or a fallback timer after 'login'.
+    //
+    // Why: mineflayer's 'spawn' event requires the server to send an
+    // update_health packet.  Some servers (notably Velocity proxies in
+    // limbo/lobby state) never send this packet, so 'spawn' never fires
+    // and the connection times out.  The declare_commands packet (which
+    // carries plugin data) is sent earlier during the play-state
+    // handshake, so we can collect it without waiting for spawn.
+    let collectionStarted = false;
+    let didSpawn = false;
+    let spawnPosition: { x: number; y: number; z: number } | undefined;
+
+    async function collectAndResolve(): Promise<void> {
+      // Guard: only run once
+      if (collectionStarted) return;
+      collectionStarted = true;
+
+      // Clear the connection timeout — we've entered play state.
+      clearTimeout(timeoutHandle);
+
+      // If the timeout already fired (race condition), bail out.
+      if (resolved) return;
+
       const latency = Date.now() - startTime;
 
-      // Get spawn position if available
-      let spawnPosition: { x: number; y: number; z: number } | undefined;
-      if (bot.entity && bot.entity.position) {
+      // Get spawn position if available (only set when spawn fired)
+      if (didSpawn && bot.entity && bot.entity.position) {
         spawnPosition = {
           x: Math.floor(bot.entity.position.x),
           y: Math.floor(bot.entity.position.y),
@@ -463,7 +545,7 @@ async function attemptConnection(
             success: authResult.success,
             error: authResult.error,
           };
-          
+
           if (authResult.authRequired) {
             logger.debug(`[BotConnector] Auth completed: type=${authResult.authType}, success=${authResult.success}`);
           } else {
@@ -494,6 +576,12 @@ async function attemptConnection(
         }
       }
 
+      // Check again — kick/error during auth wait could have resolved
+      if (resolved) {
+        bot.end();
+        return;
+      }
+
       // Collect server plugins if enabled (AFTER authentication)
       let serverPlugins: ServerPluginInfo | undefined;
       if (attemptOptions?.collectPlugins && (bot as any).pluginDetector) {
@@ -516,6 +604,61 @@ async function attemptConnection(
         }
       }
 
+      // Collect server commands if enabled (AFTER plugin detection, separate step)
+      let serverCommands: ServerCommandInfo | undefined;
+      if (attemptOptions?.collectPlugins && (bot as any).commandDetector) {
+        try {
+          logger.debug('[BotConnector] Detecting server commands...');
+          const cmdResult = await (bot as any).commandDetector.detectCommands({
+            timeout: 3000,
+          });
+          serverCommands = {
+            commands: cmdResult.commands,
+            method: cmdResult.method,
+          };
+          logger.debug(`[BotConnector] Found ${cmdResult.commands.length} commands via ${cmdResult.method}`);
+        } catch (err) {
+          logger.debug(`[BotConnector] Command detection failed: ${err}`);
+          serverCommands = {
+            commands: [],
+            method: 'none',
+          };
+        }
+      }
+
+      // Collect game modes if enabled (AFTER command detection, uses detected commands)
+      let serverGameModes: ServerGameModeInfo | undefined;
+      if (attemptOptions?.collectPlugins && (bot as any).gameModeDetector) {
+        try {
+          logger.debug('[BotConnector] Detecting game modes...');
+          const gmResult = await (bot as any).gameModeDetector.detectGameModes({
+            timeout: 3000,
+            detectedCommands: serverCommands?.commands,
+          });
+            serverGameModes = {
+              gameModes: gmResult.gameModes,
+              command: gmResult.command,
+              totalCandidates: gmResult.totalCandidates,
+              isGuiOnly: gmResult.isGuiOnly,
+            };
+            if (gmResult.isGuiOnly) {
+              logger.debug(`[BotConnector] /server tab-complete is GUI-only (player names detected), discarding all candidates)`);
+            } else if (gmResult.gameModes.length > 0) {
+              logger.debug(`[BotConnector] Found ${gmResult.gameModes.length} game modes via /${gmResult.command}: ${gmResult.gameModes.join(', ')}`);
+            } else {
+              logger.debug('[BotConnector] No game modes detected');
+            }
+          } catch (err) {
+            logger.debug(`[BotConnector] Game mode detection failed: ${err}`);
+            serverGameModes = {
+              gameModes: [],
+              command: 'none',
+              totalCandidates: 0,
+              isGuiOnly: false,
+            };
+          }
+      }
+
       const result: BotConnectResult = {
         success: true,
         host: options.host,
@@ -528,17 +671,48 @@ async function attemptConnection(
         attempts: 1,
         accountType: options.account.type,
         serverPlugins,
+        serverCommands,
         serverAuth,
+        serverGameModes,
       };
 
       bot.end();
       doResolve(result);
+    }
+
+    bot._client.once('login', () => {
+      logger.info(`[Bot] Login accepted in ${Date.now() - startTime}ms`);
+
+      // Start a grace period for the spawn event.  If the server sends
+      // update_health quickly (normal servers), 'spawn' will fire and
+      // trigger collection immediately with spawn position data.
+      // If the server never sends update_health (Velocity proxies in
+      // limbo), the fallback timer ensures we still collect data from
+      // packets already received (like declare_commands).
+      const SPAWN_GRACE_MS = 3000;
+      const loginFallbackHandle = setTimeout(() => {
+        if (!collectionStarted && !resolved) {
+          logger.info(`[Bot] Spawn not received after ${SPAWN_GRACE_MS}ms, proceeding with login-only data collection`);
+          collectAndResolve();
+        }
+      }, SPAWN_GRACE_MS);
+
+      // If spawn fires within the grace period, cancel the fallback
+      bot.once('spawn', () => {
+        clearTimeout(loginFallbackHandle);
+        didSpawn = true;
+        logger.info(`[Bot] Spawn received at ${Date.now() - startTime}ms`);
+        collectAndResolve();
+      });
     });
 
     // Handle kick
     bot.once('kicked', (reason: KickReason, loggedIn: boolean) => {
+      // Guard: if already resolved (e.g. timeout fired), skip logging
+      if (resolved) return;
+
       const reasonStr = parseKickReason(bot, reason);
-      logger.debug(`[BotConnector] Kicked: ${reasonStr}`);
+      logger.warn(`[BotConnector] Kicked: ${reasonStr}`);
 
       // Parse kick reason
       let code = 'KICKED';
@@ -571,7 +745,10 @@ async function attemptConnection(
 
     // Handle error
     bot.once('error', (err: Error) => {
-      logger.debug(`[BotConnector] Error: ${err.message}`);
+      // Guard: if already resolved (e.g. timeout fired), skip logging
+      if (resolved) return;
+
+      logger.warn(`[BotConnector] Error: ${err.message}`);
       const error = parseError(err);
 
       doResolve({
@@ -587,6 +764,9 @@ async function attemptConnection(
 
     // Handle end (connection closed)
     bot.once('end', () => {
+      // Guard: if already resolved (e.g. timeout, kick, or spawn completed), skip
+      if (resolved) return;
+
       // If we haven't resolved yet, this is an unexpected disconnect
       doResolve({
         success: false,
@@ -721,38 +901,58 @@ export async function connectBot(
 
     // If this account type failed completely
     if (lastError) {
+      const errCode = lastError.error?.code || 'UNKNOWN';
+      const errMsg = lastError.error?.message || '';
+
+      // Log the failure at info level so it's visible in scan logs
+      logger.info(`[Bot] ${accountType} attempt failed: ${errCode}${errMsg ? ` - ${errMsg}` : ''}`);
+
       // If it's an auth failure for Microsoft account, don't fall back
-      if (accountType === 'microsoft' && lastError.error?.code === 'AUTH_FAILED') {
-        logger.debug(`[BotConnector] Microsoft auth failed, not falling back`);
-        return lastError;
+      if (errCode === 'AUTH_FAILED') {
+        logger.debug(`[BotConnector] Auth failed, not falling back`);
+        return { ...lastError, attempts: retries };
       }
 
-      // If it's an online mode server and auth failed, don't fall back to cracked
-      if (serverMode === 'online' && accountType === 'microsoft') {
-        logger.debug(`[BotConnector] Online mode server, auth failed - not falling back to cracked`);
-        return lastError;
+      // If it's an online mode server and we have no fallback, don't try cracked
+      if (serverMode === 'online' && accountType === 'microsoft' && !options.fallbackAccount) {
+        logger.debug(`[BotConnector] Online mode server with no fallback, returning error`);
+        return { ...lastError, attempts: retries };
       }
 
       // Otherwise, try the next account type
-      logger.debug(`[BotConnector] ${accountType} account failed, trying next type...`);
+      logger.info(`[Bot] Falling back to next account type...`);
+
+      // Brief delay to let the previous connection fully close.
+      // Prevents "already logged on" kicks when the server hasn't
+      // processed the disconnect yet.
+      await delay(5000);
     }
   }
 
   // All account types failed - include last error details
   const lastErrorDetails = lastError?.error;
+  const lastErrorCode = lastErrorDetails?.code || 'UNKNOWN';
+
+  // Build detailed error message
+  let errorMessage: string;
+  if (lastErrorDetails?.kicked && lastErrorDetails?.kickReason) {
+    errorMessage = `Kicked: ${lastErrorDetails.kickReason}`;
+  } else if (lastErrorDetails?.kicked) {
+    errorMessage = 'Kicked from server';
+  } else if (lastErrorDetails?.message) {
+    errorMessage = `${lastErrorCode}: ${lastErrorDetails.message}`;
+  } else {
+    errorMessage = `All connection attempts failed (${lastErrorCode})`;
+  }
+
   return {
     success: false,
     host: options.host,
     port: options.port ?? 25565,
     username: getUsername(options.account),
     error: {
-      code: 'ALL_FAILED',
-      // Don't include kickReason in message - it will be shown separately
-      message: lastErrorDetails?.kicked 
-        ? 'Kicked from server'
-        : lastErrorDetails?.message && !lastErrorDetails.kickReason
-          ? lastErrorDetails.message
-          : 'All connection attempts failed',
+      code: lastErrorCode,
+      message: errorMessage,
       kicked: lastErrorDetails?.kicked,
       kickReason: lastErrorDetails?.kickReason,
     },

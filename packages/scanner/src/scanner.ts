@@ -25,12 +25,17 @@ const HTML_ESCAPE_MAP: Record<string, string> = {
 /**
  * Escape HTML entities in a string to prevent XSS
  * Applied to all untrusted text content before storage
+ * Also strips null bytes which PostgreSQL JSONB cannot store
  */
 function escapeHtml(unsafe: unknown): string {
   if (typeof unsafe !== 'string') {
     return String(unsafe ?? '');
   }
-  return unsafe.replace(/[&<>"'/]/g, (char) => HTML_ESCAPE_MAP[char]);
+  // Remove null bytes first (PostgreSQL JSONB limitation)
+  // Then escape HTML entities to prevent XSS
+  return unsafe
+    .replace(/\u0000/g, '')
+    .replace(/[&<>"'/]/g, (char) => HTML_ESCAPE_MAP[char]);
 }
 
 /**
@@ -92,9 +97,12 @@ function getJsonDepth(value: unknown, currentDepth = 0): number {
     return currentDepth;
   }
   if (Array.isArray(value)) {
+    if (value.length === 0) return currentDepth;
     return Math.max(...value.map(v => getJsonDepth(v, currentDepth + 1)));
   }
-  return Math.max(...Object.values(value as Record<string, unknown>).map(v => getJsonDepth(v, currentDepth + 1)));
+  const objValues = Object.values(value as Record<string, unknown>);
+  if (objValues.length === 0) return currentDepth;
+  return Math.max(...objValues.map(v => getJsonDepth(v, currentDepth + 1)));
 }
 
 /**
@@ -151,9 +159,17 @@ function safeJsonParse(data: string): ServerStatusData | null {
       return null;
     }
 
+    // Preserve favicon before sanitization - it's a base64 data URI, not displayable text
+    const rawFavicon = validated.data.favicon;
+
     // Sanitize all string content to prevent XSS attacks
     // This includes: MOTD/description, player names, plugin names, server version, etc.
     const sanitized = sanitizeObject(validated.data) as ServerStatusData;
+
+    // Restore original favicon (HTML escaping corrupts base64 data URIs)
+    if (rawFavicon) {
+      sanitized.favicon = rawFavicon;
+    }
 
     return sanitized;
   } catch {
@@ -163,8 +179,9 @@ function safeJsonParse(data: string): ServerStatusData | null {
 }
 
 /**
- * Custom DNS lookup function for better compatibility
- * Handles both string address and LookupAddress object return types
+ * Custom DNS lookup wrapper.
+ * With { family: 4 }, dns.lookup always returns (err, address: string, family: number).
+ * This thin wrapper just forwards the callback with the correct signature.
  */
 type LookupCallback = (err: NodeJS.ErrnoException | null, address: string, family: number) => void;
 
@@ -178,29 +195,8 @@ const customLookup = (
   options: dns.LookupOptions,
   callback: LookupCallback
 ): void => {
-  dns.lookup(hostname, options, (err, address, family) => {
-    // Handle both string address and LookupAddress cases
-    if (typeof address === 'string') {
-      callback(err, address, family);
-    } else if (address && typeof address === 'object' && 'address' in address && !Array.isArray(address)) {
-      // LookupAddress object - extract the address string
-      const lookupAddr = address as dns.LookupAddress;
-      callback(err, lookupAddr.address, typeof family === 'number' ? family : 4);
-    } else if (Array.isArray(address) && address.length > 0) {
-      // Multiple addresses - use the first one
-      const first = address[0];
-      if (typeof first === 'string') {
-        callback(err, first, 4);
-      } else if (first && typeof first === 'object' && 'address' in first && !Array.isArray(first)) {
-        const lookupAddr = first as dns.LookupAddress;
-        callback(err, lookupAddr.address, 4);
-      } else {
-        callback(err ?? new Error('Invalid DNS lookup result'), '', 4);
-      }
-    } else {
-      // Fallback
-      callback(err ?? new Error('Invalid DNS lookup result'), '', 4);
-    }
+  dns.lookup(hostname, { ...options, family: 4 }, (err, address, family) => {
+    callback(err, address as string, family as number);
   });
 };
 
@@ -422,11 +418,11 @@ export class MinecraftScanner {
     const options = this.createSocksOptions({ host, port });
     const connectionTimeoutMs = this.options.timeout;
     let socket: net.Socket | null = null;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
-    // Create a timeout promise
+    // Create a timeout promise — store the handle so we can clear it on success
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => {
-        // Clean up socket if it exists
+      timeoutHandle = setTimeout(() => {
         if (socket) {
           socket.destroy();
           socket = null;
@@ -446,11 +442,9 @@ export class MinecraftScanner {
         return socket;
       })
       .catch((err) => {
-        // Ensure we have a proper Error object
         const error = err instanceof Error
           ? err
           : new Error(typeof err === 'object' && err !== null && 'message' in err ? String(err.message) : String(err) || 'SOCKS connection failed');
-        // Clean up socket if it exists
         if (socket) {
           socket.destroy();
           socket = null;
@@ -462,17 +456,20 @@ export class MinecraftScanner {
     try {
       socket = await Promise.race([connectionPromise, timeoutPromise]);
     } catch (err) {
+      // Clear timeout on failure too (timeout may not have fired if connection failed first)
+      if (timeoutHandle) clearTimeout(timeoutHandle);
       const error = err instanceof Error ? err : new Error(String(err));
       this.logError(`SOCKS connection failed:`, error.message);
       throw error;
     }
 
-    // At this point, socket must be non-null (otherwise we would have thrown above)
+    // Clear the connection timeout — connection succeeded, don't let it destroy the socket later
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+
     if (!socket) {
       throw new Error('SOCKS connection failed: No socket available');
     }
 
-    // Non-null assertion: we've verified socket is not null above
     const establishedSocket: net.Socket = socket;
 
     return new Promise((resolve, reject) => {
@@ -532,30 +529,29 @@ export class MinecraftScanner {
     }, timeout);
 
     // Send handshake and status request immediately after connection
-    (async () => {
-      try {
-        const handshake = await packetGen.craftHandshake(
-          host,
-          port,
-          this.options.protocolVersion
-        );
+    try {
+      const handshake = packetGen.craftHandshake(
+        host,
+        port,
+        this.options.protocolVersion
+      );
 
-        const statusRequest = await packetGen.craftEmptyPacket(0);
+      const statusRequest = packetGen.craftEmptyPacket(0);
 
-        this.log(`Sending handshake packet (${handshake.length} bytes)`, Array.from(handshake).slice(0, 20));
-        this.log(`Sending status request packet (${statusRequest.length} bytes)`, Array.from(statusRequest));
+      this.log(`Sending handshake packet (${handshake.length} bytes)`, Array.from(handshake).slice(0, 20));
+      this.log(`Sending status request packet (${statusRequest.length} bytes)`, Array.from(statusRequest));
 
-        socket.write(handshake);
-        socket.write(statusRequest);
-      } catch (error) {
-        this.log(`Error sending packets:`, error);
-        clearTimeout(timeoutHandle);
-        socket.destroy();
-        reject(error);
-      }
-    })();
+      socket.write(handshake);
+      socket.write(statusRequest);
+    } catch (error) {
+      this.log(`Error sending packets:`, error);
+      clearTimeout(timeoutHandle);
+      socket.destroy();
+      reject(error);
+      return;
+    }
 
-    socket.on('data', async (chunk) => {
+    socket.on('data', (chunk) => {
       try {
         // Handle both Buffer and string chunk types
         let uint8Chunk: Uint8Array;
@@ -572,7 +568,7 @@ export class MinecraftScanner {
 
         this.log(`Received data chunk (${uint8Chunk.length} bytes)`, Array.from(uint8Chunk).slice(0, 20));
 
-        packet = await packetDec.packetPipeline(uint8Chunk, packet);
+        packet = packetDec.packetPipeline(uint8Chunk, packet);
 
         this.log(`Packet state after processing:`, {
           handshakeBaked: packet.status.handshakeBaked,
@@ -622,7 +618,7 @@ export class MinecraftScanner {
         // Send ping request if handshake is complete
         if (packet.status.handshakeBaked && !packet.status.pingSent && this.options.ping) {
           this.log(`Handshake complete, sending ping request`);
-          const pingRequest = await packetGen.craftPingPacket();
+          const pingRequest = packetGen.craftPingPacket();
           this.log(`Ping packet (${pingRequest.length} bytes)`, Array.from(pingRequest));
           packet.status.pingSentTime = Date.now();
           packet.status.pingSent = true;
@@ -670,7 +666,7 @@ export class MinecraftScanner {
         }
       );
 
-      socket.on('connect', async () => {
+      socket.on('connect', () => {
         this.log(`Socket connected to ${host}:${port}`);
         // Use the shared protocol handler
         this.runScanProtocol(socket, host, port, resolve, reject);

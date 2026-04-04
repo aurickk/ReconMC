@@ -1,23 +1,26 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import fastifyStatic from '@fastify/static';
+import compress from '@fastify/compress';
 import { runMigrations } from './db/migrate.js';
-import { batchRoutes } from './routes/batches.js';
 import { taskRoutes } from './routes/tasks.js';
-import { accountRoutes } from './routes/accounts.js';
+import { serverRoutes } from './routes/servers.js';
+import { queueRoutes } from './routes/queue.js';
+import { sessionRoutes, sessionAgentRoutes } from './routes/sessions.js';
 import { proxyRoutes } from './routes/proxies.js';
 import { agentRoutes } from './routes/agents.js';
 import { logger } from './logger.js';
 import { requireApiKey, isAuthDisabled } from './middleware/auth.js';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { existsSync } from 'fs';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { isRedisAvailable, closeRedis } from './db/redis.js';
+import { createDb, closeDb } from './db/index.js';
+import { startStuckTaskRecovery } from './services/redisQueueService.js';
+import { reconcileResourceUsage } from './services/resourceAllocator.js';
 
 function getCorsOrigin(allowedOrigins: string[] | undefined) {
   if (allowedOrigins?.length) {
+    // Allow all origins if * is in the list (dev mode)
+    if (allowedOrigins.includes('*')) {
+      return true;
+    }
     return (reqOrigin: string | undefined, cb: (err: Error | null, allow: boolean) => void) => {
       cb(null, !reqOrigin || allowedOrigins.includes(reqOrigin));
     };
@@ -27,16 +30,36 @@ function getCorsOrigin(allowedOrigins: string[] | undefined) {
 }
 
 export async function createCoordinatorServer(allowedOrigins?: string[]) {
-  const fastify = Fastify({ logger: true, trustProxy: true });
+  // Configure logger to only log errors and slow requests (>1s)
+  const fastify = Fastify({
+    logger: {
+      level: 'warn', // Only log warnings and errors
+      transport: process.env.NODE_ENV === 'development' ? {
+        target: 'pino-pretty',
+        options: { colorize: true }
+      } : undefined
+    },
+    trustProxy: true,
+    disableRequestLogging: true, // Disable automatic request/response logging
+    bodyLimit: 10 * 1024 * 1024, // 10MB - allows adding large server lists
+  });
 
   await fastify.register(cors, {
     origin: getCorsOrigin(allowedOrigins),
     credentials: true
   });
 
+  // Enable response compression (gzip, deflate) for JSON payloads
+  await fastify.register(compress, { encodings: ['gzip', 'deflate'] });
+
   // Register /api/health BEFORE other routes so it stays public (no auth required)
   fastify.get('/api/health', async (_request, reply) => {
-    return reply.send({ status: 'ok', service: 'coordinator' });
+    const redisAvailable = isRedisAvailable();
+    return reply.send({
+      status: 'ok',
+      service: 'coordinator',
+      redis: redisAvailable ? 'ok' : 'unavailable',
+    });
   });
 
   // Auth status endpoint (public) - lets frontend know if auth is required
@@ -51,35 +74,24 @@ export async function createCoordinatorServer(allowedOrigins?: string[]) {
   // Register task routes (public for agents, GET logs are protected internally)
   await fastify.register(taskRoutes, { prefix: '/api' });
 
+  // Register queue routes (public for agents)
+  await fastify.register(queueRoutes, { prefix: '/api' });
+
+  // Register agent-facing session routes (trusted-network auth, no API key)
+  await fastify.register(sessionAgentRoutes, { prefix: '/api' });
+
   // Register protected routes (require API key)
   await fastify.register(async function (fastify) {
     fastify.addHook('onRequest', requireApiKey);
-    await fastify.register(batchRoutes, { prefix: '/api' });
-    await fastify.register(accountRoutes, { prefix: '/api' });
+    await fastify.register(serverRoutes, { prefix: '/api' });
+    await fastify.register(sessionRoutes, { prefix: '/api' });
     await fastify.register(proxyRoutes, { prefix: '/api' });
   });
 
-  // Serve dashboard static files from dashboard/dist
-  const dashboardDist = path.join(__dirname, '../../dashboard/dist');
-  if (existsSync(dashboardDist)) {
-    await fastify.register(fastifyStatic, {
-      root: dashboardDist,
-      prefix: '/',
-      wildcard: false,
-    });
-
-    // Serve index.html for all non-API routes (SPA support)
-    fastify.setNotFoundHandler((request, reply) => {
-      if (!request.url.startsWith('/api')) {
-        return reply.sendFile('index.html');
-      }
-      reply.code(404).send({ error: 'Not Found', message: 'Route not found' });
-    });
-
-    logger.info(`Dashboard static files served from ${dashboardDist}`);
-  } else {
-    logger.warn('Dashboard dist folder not found, serving API only');
-  }
+  // 404 handler for unknown API routes
+  fastify.setNotFoundHandler((request, reply) => {
+    reply.code(404).send({ error: 'Not Found', message: 'Route not found' });
+  });
 
   // Sanitize error messages - don't expose raw errors in production
   fastify.setErrorHandler((error, _request, reply) => {
@@ -103,4 +115,37 @@ export async function startCoordinatorServer(
   const server = await createCoordinatorServer(allowedOrigins);
   await server.listen({ port, host });
   logger.info(`Coordinator listening on http://${host}:${port}`);
+
+  // Reconcile leaked resource counters on startup
+  const db = createDb();
+  await reconcileResourceUsage(db);
+
+  // Start periodic recovery of tasks stuck in "processing" state
+  const recoveryInterval = startStuckTaskRecovery(db);
+
+  // Graceful shutdown: close connections and drain in-flight requests
+  const shutdown = async (signal: string) => {
+    logger.info(`Received ${signal}, shutting down gracefully...`);
+
+    // Stop accepting new connections and wait for in-flight requests to finish
+    try {
+      await server.close();
+      logger.info('Fastify server closed');
+    } catch (err) {
+      logger.error('Error closing Fastify server:', err);
+    }
+
+    // Stop the stuck-task recovery interval
+    clearInterval(recoveryInterval);
+
+    // Close Redis and database connections
+    await closeRedis();
+    await closeDb();
+
+    logger.info('Graceful shutdown complete');
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }

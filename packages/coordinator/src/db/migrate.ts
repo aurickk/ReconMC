@@ -6,10 +6,9 @@ import { logger } from '../logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) {
-  throw new Error('DATABASE_URL environment variable is required');
-}
+// Use the same default DATABASE_URL as db/index.ts for Docker Compose setup consistency
+const defaultDatabaseUrl = `postgres://reconmc:${process.env.POSTGRES_PASSWORD || 'reconmc'}@postgres:5432/reconmc`;
+const connectionString = process.env.DATABASE_URL || defaultDatabaseUrl;
 
 /**
  * Track which migrations have been applied

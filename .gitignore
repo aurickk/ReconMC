@@ -1,6 +1,5 @@
 # Dependencies
 node_modules/
-package-lock.json
 
 # Environment variables
 .env
@@ -28,13 +27,12 @@ logs/
 *.log
 npm-debug.log*
 
-# Testing
-coverage/
-.nyc_output/
-references/
-
 # Temporary files
 *.tmp
 *.temp
-docs/
-README.md
+testing/
+discord-bot
+dashboard
+
+# Skidding
+.planning/

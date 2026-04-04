@@ -1,10 +1,8 @@
-/**
- * Cracked account - just a username
- */
-export interface CrackedAccount {
-  type: 'cracked';
-  username: string;
-}
+import type { ProxyConfig } from '@reconmc/scanner';
+// Import account types from auth module (single source of truth)
+import type { CrackedAccount, MicrosoftTokenAccount, Account } from './auth/types.js';
+// Re-export for convenience
+export type { CrackedAccount, MicrosoftTokenAccount, Account } from './auth/types.js';
 
 /**
  * NBT compound node types for parsing chat messages
@@ -55,30 +53,8 @@ export interface MineflayerBotOptions {
   [key: string]: unknown;
 }
 
-/**
- * Microsoft account with access and refresh tokens
- */
-export interface MicrosoftTokenAccount {
-  type: 'microsoft';
-  accessToken: string;
-  refreshToken?: string;
-}
-
-/**
- * Union type for all account types
- */
-export type Account = CrackedAccount | MicrosoftTokenAccount;
-
-/**
- * Proxy configuration
- */
-export interface ProxyConfig {
-  host: string;
-  port: number;
-  type: 'socks5' | 'socks4';
-  username?: string;
-  password?: string;
-}
+// Re-export ProxyConfig from @reconmc/scanner
+export type { ProxyConfig } from '@reconmc/scanner';
 
 /**
  * Bot connection options
@@ -88,7 +64,7 @@ export interface BotConnectOptions {
   port?: number;
   account: Account;
   fallbackAccount?: Account;
-  proxy: ProxyConfig;
+  proxy?: ProxyConfig;
   timeout?: number;
   retries?: number;
   retryDelay?: number;
@@ -133,6 +109,28 @@ export interface ServerPluginInfo {
 }
 
 /**
+ * Server command detection result
+ */
+export interface ServerCommandInfo {
+  commands: string[];
+  method: 'declare_commands' | 'tab_complete' | 'none';
+}
+
+/**
+ * Server game mode detection result
+ */
+export interface ServerGameModeInfo {
+  /** Detected game mode names */
+  gameModes: string[];
+  /** Which command was used for detection */
+  command: 'server' | 'servers' | 'both' | 'none';
+  /** Total tab-complete candidates received */
+  totalCandidates: number;
+  /** Whether autocomplete was detected as GUI-only (player names in completions) */
+  isGuiOnly: boolean;
+}
+
+/**
  * Server authentication result (for cracked servers)
  */
 export interface ServerAuthInfo {
@@ -163,8 +161,12 @@ export interface BotConnectResult {
   latency?: number;
   accountType?: 'cracked' | 'microsoft';
   serverPlugins?: ServerPluginInfo;
+  /** Detected server commands */
+  serverCommands?: ServerCommandInfo;
   /** Authentication result for cracked servers */
   serverAuth?: ServerAuthInfo;
+  /** Detected game modes from /server or /servers tab-complete */
+  serverGameModes?: ServerGameModeInfo;
 }
 
 /**

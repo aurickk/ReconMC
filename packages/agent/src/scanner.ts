@@ -2,19 +2,11 @@
  * Full scan: ping server then connect bot with plugin detection.
  * Mirrors the API /scan/full flow for use by the agent.
  */
-import { scanServer, detectServerMode } from '@reconmc/scanner';
+import { scanServer, isNativelySupported, getNativeVersion, MAX_NATIVE_PROTOCOL, PROTOCOL_VERSIONS } from '@reconmc/scanner';
 import { connectBot } from '@reconmc/bot';
 import type { Account } from '@reconmc/bot';
-import type { ScanResult } from '@reconmc/scanner';
+import type { ScanResult, IpLocation, ProxyConfig } from '@reconmc/scanner';
 import { logger } from './logger.js';
-
-export interface ProxyConfig {
-  host: string;
-  port: number;
-  type: 'socks4' | 'socks5';
-  username?: string;
-  password?: string;
-}
 
 export interface FullScanResult {
   ping: ScanResult;
@@ -32,7 +24,9 @@ export interface FullScanResult {
     latency?: number;
     accountType?: 'cracked' | 'microsoft';
     serverPlugins?: { plugins: string[]; method: string };
+    serverCommands?: { commands: string[]; method: string };
     serverAuth?: { authRequired: boolean; authType?: string; success: boolean; error?: string };
+    serverGameModes?: { gameModes: string[]; command: string; totalCandidates: number; isGuiOnly: boolean };
   };
   serverMode?: 'unknown' | 'cracked' | 'online';
 }
@@ -80,9 +74,57 @@ function formatServerStatus(status: any): string {
 }
 
 /**
- * Run full scan: ping then bot connection with plugin detection.
+ * Lookup geolocation for an IP address using a free API
  */
-export async function runFullScan(input: FullScanInput): Promise<FullScanResult> {
+async function lookupIpLocation(ip: string): Promise<IpLocation | null> {
+  try {
+    const response = await fetch(`http://ip-api.com/json/${ip}`, {
+      signal: AbortSignal.timeout(5000), // 5 second timeout
+    });
+    if (response.status !== 200) {
+      return null;
+    }
+    const data = await response.json() as {
+      country?: string;
+      countryCode?: string;
+      city?: string;
+      isp?: string;
+      lat?: number;
+      lon?: number;
+      status?: string;
+    };
+    if (data.status === 'fail') {
+      return null;
+    }
+    // ip-api.com returns:
+    //   "country"     = full name (e.g., "United States")
+    //   "countryCode" = 2-letter ISO code (e.g., "US")
+    return {
+      country: data.countryCode,  // 2-letter country code (e.g., "US")
+      countryName: data.country,  // Full country name (e.g., "United States")
+      city: data.city,
+      isp: data.isp,
+      lat: data.lat,
+      lon: data.lon,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Run full scan: ping then bot connection with plugin detection.
+ *
+ * @param input - Scan configuration
+ * @param onPingComplete - Optional callback invoked after the ping phase succeeds,
+ *   before the bot join phase starts.  Receives the partial FullScanResult
+ *   containing ping data.  Useful for capturing partial results if the bot
+ *   phase is later interrupted by an external timeout.
+ */
+export async function runFullScan(
+  input: FullScanInput,
+  onPingComplete?: (partial: FullScanResult) => void,
+): Promise<FullScanResult> {
   const scanStartTime = Date.now();
 
   const proxy = {
@@ -119,23 +161,30 @@ export async function runFullScan(input: FullScanInput): Promise<FullScanResult>
     return result;
   }
 
-  // Determine server mode
-  let serverMode: 'unknown' | 'cracked' | 'online' = pingResult.serverMode ?? 'unknown';
-  if (serverMode === 'unknown' && pingResult.status?.data?.players?.sample) {
-    const sample = pingResult.status.data.players.sample;
-    const hasInvalidUUIDs = sample.some(
-      (p: { id?: string }) =>
-        p.id && (p.id.startsWith('00000000') || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p.id))
-    );
-    const hasValidUUIDs = sample.some(
-      (p: { id?: string }) => p.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p.id)
-    );
-    if (hasValidUUIDs && !hasInvalidUUIDs) serverMode = 'online';
-    else if (hasInvalidUUIDs) serverMode = 'cracked';
+  // Lookup IP geolocation if we have a resolved IP
+  if (pingResult.resolvedIp) {
+    const location = await lookupIpLocation(pingResult.resolvedIp);
+    if (location) {
+      pingResult.location = location;
+      const locationStr = location.countryName
+        ? `${location.countryName}${location.city ? `, ${location.city}` : ''}`
+        : location.country || 'Unknown';
+      logger.info(`[Geo] IP location: ${locationStr} (${pingResult.resolvedIp})`);
+    }
   }
 
+  // Server mode is already detected by scanServer when enableServerModeDetection: true
+  // No need to re-detect here - use the value from pingResult.serverMode
+  const serverMode: 'unknown' | 'cracked' | 'online' = pingResult.serverMode ?? 'unknown';
   result.serverMode = serverMode;
   logger.info(`[Mode] Server mode: ${serverMode}`);
+
+  // Notify caller that ping phase is complete -- allows capturing partial
+  // results for timeout resilience (ping data survives even if bot phase
+  // is killed by the global task timeout).
+  if (onPingComplete) {
+    onPingComplete({ ...result });
+  }
 
   if (serverMode === 'online' && input.account.type !== 'microsoft') {
     logger.warn(`[Mode] Account mismatch: Server requires online-mode authentication`);
@@ -151,20 +200,46 @@ export async function runFullScan(input: FullScanInput): Promise<FullScanResult>
   }
 
   const collectPlugins = input.collectPlugins !== false;
+
+  // Determine connection strategy based on server protocol version.
+  // mineflayer supports 1.7 through 1.21.11 (protocol 774).
+  // For servers reporting a supported protocol, connect with the matching version.
+  // For unsupported protocols (>774), try the highest native version directly
+  // (many servers accept older clients via ViaVersion).
+  const serverProtocol = pingResult.status?.data?.version?.protocol;
+  const serverVersion = pingResult.status?.data?.version?.name || 'unknown';
+  const highestNativeVersion = PROTOCOL_VERSIONS[MAX_NATIVE_PROTOCOL]; // '1.21.11'
+
+  const nativeVersion = serverProtocol != null ? getNativeVersion(serverProtocol) : null;
+  const needsVersionFallback = serverProtocol != null && !isNativelySupported(serverProtocol);
+
+  if (nativeVersion) {
+    logger.info(`[Protocol] Server ${serverVersion} (protocol ${serverProtocol}) → connecting with ${nativeVersion}`);
+  } else if (needsVersionFallback) {
+    logger.info(`[Protocol] Server ${serverVersion} (protocol ${serverProtocol}) exceeds native support (max ${highestNativeVersion}) — trying ${highestNativeVersion}`);
+  }
+
+  // Version to connect with:
+  // - Natively supported protocol → exact matching version
+  // - Protocol exceeds support → highest native version (server may accept via ViaVersion)
+  // - Unknown protocol → let mineflayer auto-detect (no version override)
+  const connectVersion = nativeVersion || (needsVersionFallback ? highestNativeVersion : undefined);
+
   const connectResult = await connectBot(
     {
-      host: input.host,
-      port: input.port,
       account: input.account,
       fallbackAccount: input.fallbackAccount,
-      proxy,
-      timeout: 15000,
-      retries: 2,
-      retryDelay: 2000,
       collectPlugins,
       pluginTimeout: input.pluginTimeout ?? 5000,
       enableAutoAuth: input.enableAutoAuth ?? true,
       authTimeout: input.authTimeout ?? 3000,
+      host: input.host,
+      port: input.port,
+      proxy,
+      timeout: 20000,
+      retries: 1,
+      retryDelay: 2000,
+      ...(connectVersion && { version: connectVersion }),
     },
     serverMode
   );
@@ -189,12 +264,28 @@ export async function runFullScan(input: FullScanInput): Promise<FullScanResult>
       const method = connectResult.serverPlugins.method || 'unknown';
       logger.info(`[Plugins] Detected ${count} plugins (method: ${method})`);
     }
+    if (connectResult.serverCommands?.commands) {
+      const count = connectResult.serverCommands.commands.length;
+      const method = connectResult.serverCommands.method || 'unknown';
+      logger.info(`[Commands] Detected ${count} commands (method: ${method})`);
+    }
+    if (connectResult.serverGameModes?.gameModes && connectResult.serverGameModes.gameModes.length > 0) {
+      const count = connectResult.serverGameModes.gameModes.length;
+      const cmd = connectResult.serverGameModes.command || 'unknown';
+      const modes = connectResult.serverGameModes.gameModes.slice(0, 10).join(', ');
+      const truncated = count > 10 ? ` (showing first 10 of ${count})` : '';
+      logger.info(`[GameModes] Detected ${count} game modes via /${cmd}: ${modes}${truncated}`);
+    }
   } else {
     const errorMsg = connectResult.error?.message || 'Unknown error';
     const errorCode = connectResult.error?.code || 'UNKNOWN';
     const wasKicked = connectResult.error?.kicked ? ' (kicked)' : '';
     const kickReason = connectResult.error?.kickReason || '';
-    logger.warn(`[Bot] Connection failed: ${errorCode}${wasKicked}${kickReason ? ` - ${redactProxy(kickReason)}` : ''} (${connectResult.attempts} attempts)`);
+    // Always include error message alongside code for actionable diagnostics
+    const errorDetail = kickReason
+      ? redactProxy(kickReason)
+      : (errorMsg !== errorCode ? redactProxy(errorMsg) : '');
+    logger.warn(`[Bot] Connection failed: ${errorCode}${wasKicked}${errorDetail ? ` - ${errorDetail}` : ''} (${connectResult.attempts} attempts)`);
   }
 
   result.connection = {
@@ -211,7 +302,9 @@ export async function runFullScan(input: FullScanInput): Promise<FullScanResult>
     latency: connectResult.latency,
     accountType: connectResult.accountType,
     serverPlugins: connectResult.serverPlugins,
+    serverCommands: connectResult.serverCommands,
     serverAuth: connectResult.serverAuth,
+    serverGameModes: connectResult.serverGameModes,
   };
 
   const scanTime = Date.now() - scanStartTime;

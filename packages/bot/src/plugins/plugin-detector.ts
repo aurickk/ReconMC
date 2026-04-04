@@ -77,7 +77,6 @@ const COMMAND_SIGNATURES = new Map<string, string>([
   ['tp', 'essentialsx'],
   ['tphere', 'essentialsx'],
   ['tpo', 'essentialsx'],
-  ['tphere', 'essentialsx'],
   ['tpa', 'essentialsx'],
   ['tpahere', 'essentialsx'],
   ['warp', 'essentialsx'],
@@ -163,12 +162,12 @@ const COMMAND_SIGNATURES = new Map<string, string>([
   ['corelookup', 'coreprotect'],
 
   // LuckoPerms
-  ['lp', 'luckyperms'],
-  ['luckyperms:', 'luckyperms'],
-  ['luckyperms', 'luckyperms'],
-  ['perm', 'luckyperms'],
-  ['permission', 'luckyperms'],
-  ['networkuser', 'luckyperms'],
+  ['lp', 'luckperms'],
+  ['luckperms:', 'luckperms'],
+  ['luckperms', 'luckperms'],
+  ['perm', 'luckperms'],
+  ['permission', 'luckperms'],
+  ['networkuser', 'luckperms'],
 
   // ProtocolLib
   ['protocol', 'protocollib'],
@@ -200,7 +199,7 @@ const COMMAND_SIGNATURES = new Map<string, string>([
   ['discord', 'discordsrv'],
 
   // Essentials
-  ['essentails:', 'essentialsx'],
+  ['essentials:', 'essentialsx'],
   ['esschat', 'essentialsx'],
   ['essentials:chat', 'essentialsx'],
   ['essentials:spawn', 'essentialsx'],
@@ -310,7 +309,7 @@ const COMMAND_SIGNATURES = new Map<string, string>([
   ['ws', 'wildstacker'],
 
   // RoseStacker
-  ['rodestacker', 'rosestacker'],
+  ['rosestacker', 'rosestacker'],
   ['rosestacker:', 'rosestacker'],
 
   // SuperiorSkyblock
@@ -326,7 +325,7 @@ const COMMAND_SIGNATURES = new Map<string, string>([
 
   // ASkyBlock
   ['askyblock', 'askyblock'],
-  ['island', 'askyblock'],
+  // Note: 'island' is reserved for superiorskyblock to avoid duplicate key conflict
 
   // UltimateChat
   ['ultimatechat', 'ultimatechat'],
@@ -352,7 +351,7 @@ const COMMAND_SIGNATURES = new Map<string, string>([
   // CrazyCrates
   ['crazycrates', 'crazycrates'],
   ['crate', 'crazycrates'],
-  ['cc', 'crazycrates'],
+  // Note: 'cc' is reserved for chatcontrol to avoid duplicate key conflict
 
   // UltimateTimber
   ['ultimatetimber', 'ultimatetimber'],
@@ -748,7 +747,13 @@ export function pluginDetector(bot: Bot) {
   }
 
   /**
-   * Try to detect plugins using multi-phase tab completion
+   * Try to detect plugins using multi-phase tab completion.
+   *
+   * `timeout` is a **global budget** for the entire tab-complete scan, NOT a
+   * per-phase timeout.  Each phase gets a share of the remaining budget with
+   * a minimum of 500ms per request.  This prevents the scan from consuming
+   * 11 * timeout ms on servers that never respond to tab_complete packets
+   * (e.g., Velocity proxies).
    */
   async function tryTabComplete(timeout: number): Promise<PluginDetectionResult | null> {
     logger.debug('[PluginDetector] Starting multi-phase tab complete scan');
@@ -756,11 +761,25 @@ export function pluginDetector(bot: Bot) {
     const allPlugins = new Set<string>(commandTreePlugins);
     const detectedFromTabComplete = new Set<string>();
 
+    const deadline = Date.now() + Math.max(timeout, 3000);
+    const MIN_PHASE_TIMEOUT_MS = 500;
+
     for (const phase of TAB_COMPLETE_PHASES) {
-      logger.debug(`[PluginDetector] Tab complete phase: ${phase.description} (${phase.command})`);
+      const remaining = deadline - Date.now();
+      if (remaining < MIN_PHASE_TIMEOUT_MS) {
+        logger.debug(`[PluginDetector] Tab complete budget exhausted, skipping remaining phases`);
+        break;
+      }
+
+      // Give each remaining phase an equal share of the remaining budget,
+      // but never less than MIN_PHASE_TIMEOUT_MS.
+      const phasesLeft = TAB_COMPLETE_PHASES.length - TAB_COMPLETE_PHASES.indexOf(phase);
+      const perPhaseTimeout = Math.max(Math.floor(remaining / phasesLeft), MIN_PHASE_TIMEOUT_MS);
+
+      logger.debug(`[PluginDetector] Tab complete phase: ${phase.description} (${phase.command}) timeout=${perPhaseTimeout}ms`);
 
       try {
-        const suggestions = await performTabComplete(phase.command, Math.max(timeout, 3000));
+        const suggestions = await performTabComplete(phase.command, perPhaseTimeout);
 
         for (const suggestion of suggestions) {
           const pluginFromNamespace = extractPluginFromNamespace(suggestion);
@@ -776,7 +795,11 @@ export function pluginDetector(bot: Bot) {
           }
         }
 
-        await new Promise(r => setTimeout(r, 200));
+        // Brief pause between phases to avoid flooding the server
+        const pauseRemaining = deadline - Date.now();
+        if (pauseRemaining > 200) {
+          await new Promise(r => setTimeout(r, 200));
+        }
       } catch (err) {
         logger.error(`[PluginDetector] Error in phase ${phase.description}:`, err);
       }
@@ -866,21 +889,52 @@ export function pluginDetector(bot: Bot) {
   }
 
   /**
-   * Detect plugins using all available methods
+   * Detect plugins using all available methods.
+   *
+   * Phase 1: Always run command_tree + tab_complete together.
+   *   tryTabComplete already unions commandTreePlugins with tab-complete
+   *   suggestions, so the combined result is a superset of either alone.
+   *   This avoids a regression where command_tree alone finds a partial
+   *   set and early-returns before tab_complete can augment it.
+   *
+   * Phase 2: If Phase 1 found nothing, fall through to /plugins and
+   *   /bukkit:plugins chat commands as a last resort.
    */
   async function detectPlugins(options?: PluginDetectorOptions): Promise<PluginDetectionResult> {
     const opts = { ...defaultOptions, ...options };
 
-    for (const method of opts.methods) {
+    // Phase 1: Passive/low-risk detection — command tree + tab complete.
+    // Always run both; tryTabComplete merges commandTreePlugins internally.
+    if (opts.methods.includes('command_tree')) {
+      await tryCommandTree(); // populates commandTreePlugins set
+    }
+
+    if (opts.methods.includes('tab_complete')) {
+      const combined = await tryTabComplete(opts.timeout);
+      if (combined && combined.plugins.length > 0) {
+        return combined;
+      }
+    }
+
+    // If command_tree found plugins but tab_complete added nothing new,
+    // return the command_tree results.
+    if (commandTreePlugins.size > 0) {
+      return {
+        plugins: Array.from(commandTreePlugins),
+        method: 'command_tree',
+      };
+    }
+
+    // Phase 2: Active detection — send chat commands.
+    // Only reached when passive methods found nothing.
+    const chatMethods: ('plugins_command' | 'bukkit_plugins_command')[] = [];
+    if (opts.methods.includes('plugins_command')) chatMethods.push('plugins_command');
+    if (opts.methods.includes('bukkit_plugins_command')) chatMethods.push('bukkit_plugins_command');
+
+    for (const method of chatMethods) {
       let result: PluginDetectionResult | null = null;
 
       switch (method) {
-        case 'command_tree':
-          result = await tryCommandTree();
-          break;
-        case 'tab_complete':
-          result = await tryTabComplete(opts.timeout);
-          break;
         case 'plugins_command':
           result = await tryPluginsCommand(opts.timeout);
           break;

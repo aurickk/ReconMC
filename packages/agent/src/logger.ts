@@ -11,7 +11,7 @@ interface LogEntry {
 
 let currentTaskId: string | null = null;
 let logBuffer: LogEntry[] = [];
-let flushTimer: NodeJS.Timeout | null = null;
+let flushTimer: ReturnType<typeof setInterval> | null = null;
 const FLUSH_INTERVAL_MS = 2000;
 const MAX_BUFFER_SIZE = 50;
 
@@ -29,18 +29,19 @@ export function setTaskContext(taskId: string) {
   startFlushTimer();
 }
 
-export function clearTaskContext() {
-  flushLogs();
+export async function clearTaskContext() {
+  // Flush logs and wait for them to be sent before clearing context
+  await flushLogs();
   currentTaskId = null;
   logBuffer = [];
   if (flushTimer) {
-    clearTimeout(flushTimer);
+    clearInterval(flushTimer);
     flushTimer = null;
   }
 }
 
 function startFlushTimer() {
-  if (flushTimer) clearTimeout(flushTimer);
+  if (flushTimer) clearInterval(flushTimer);
   flushTimer = setInterval(() => {
     if (logBuffer.length > 0) {
       flushLogs();
@@ -71,18 +72,18 @@ async function flushLogs() {
 }
 
 function addLog(level: 'info' | 'warn' | 'error', message: string) {
+  // Strip existing level prefixes from message to avoid duplicates like [INFO] [INFO]
+  let cleanMessage = String(message).substring(0, 10000); // Limit message size
+  const levelPrefix = new RegExp(`^\\[${level.toUpperCase()}\\]\\s*`, 'i');
+  cleanMessage = cleanMessage.replace(levelPrefix, '').trim();
+
   const entry: LogEntry = {
     level,
-    message: String(message).substring(0, 10000), // Limit message size
+    message: cleanMessage,
     timestamp: Date.now(),
   };
 
   logBuffer.push(entry);
-
-  // Also log to original console (not the intercepted one)
-  const timestamp = new Date(entry.timestamp).toISOString();
-  const originalMethod = level === 'error' ? originalConsole.error : level === 'warn' ? originalConsole.warn : originalConsole.log;
-  originalMethod(`[${timestamp}] [${level.toUpperCase()}]`, message);
 
   // Auto-flush if buffer is full
   if (logBuffer.length >= MAX_BUFFER_SIZE) {
